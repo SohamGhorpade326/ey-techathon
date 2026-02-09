@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+python-dotenv
+requests
+pdfplumber
+langgraph
+playwright
+pymongo
+pytesseract
+pdf2image
+numpy
+torch
+sentence-transformers
+scikit-learn
+sympy
