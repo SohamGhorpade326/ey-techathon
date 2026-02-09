@@ -16,6 +16,7 @@ import Repository from "./pages/Repository";
 import Settings from "./pages/Settings";
 import NotFound from "./pages/NotFound";
 import Masteragent from "./pages/Masteragent";
+import SkuGapAnalytics from "./pages/SkuGapAnalytics";
 const queryClient = new QueryClient();
 
 const App = () => (
@@ -31,6 +32,7 @@ const App = () => (
           <Route path="/discovery" element={<Discovery />} />
           <Route path="/rfp/:rfpId*" element={<RFPDetails />} />
           <Route path="/analysis" element={<Analysis />} />
+          <Route path="/sku-gap-analytics" element={<SkuGapAnalytics />} />
           <Route path="/pricing" element={<Pricing />} />
           <Route path="/proposal" element={<Proposal />} />
           <Route path="/notifications" element={<Notifications />} />

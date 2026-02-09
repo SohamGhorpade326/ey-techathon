@@ -6,6 +6,8 @@ import dotenv from "dotenv";
 import productRoutes from "./routes/product.js";
 import rfpRoutes from "./routes/rfps.js";
 import testingMatrixRoutes from "./routes/testingMatrix.js";
+import skuGapRoutes from "./routes/skuGap.routes.js";
+import skuGapAIRoutes from "./routes/skuGapAI.routes.js";
 
 dotenv.config();
 
@@ -21,6 +23,8 @@ mongoose
 app.use("/api/products", productRoutes);
 app.use("/api/rfps", rfpRoutes);
 app.use("/api/testing-matrix", testingMatrixRoutes);
+app.use("/api/sku-gap", skuGapRoutes);
+app.use("/api/sku-gap/insights", skuGapAIRoutes);
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () =>

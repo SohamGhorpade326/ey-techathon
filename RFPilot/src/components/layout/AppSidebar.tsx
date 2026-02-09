@@ -12,6 +12,7 @@ import {
   LogOut,
   Sparkles,
   Zap,
+  Package,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -20,8 +21,10 @@ const navigation = [
   { name: "RFP Discovery", href: "/discovery", icon: Search },
   { name: "Strategic Orchestrator", href: "/master-agent", icon: Zap },
   { name: "AI Analysis Workspace", href: "/analysis", icon: Brain },
+ 
   { name: "Pricing & Summary", href: "/pricing", icon: DollarSign },
   { name: "Proposal Builder", href: "/proposal", icon: FileText },
+   { name: "SKU Gap Intelligence", href: "/sku-gap-analytics", icon: Package },
   { name: "Notifications", href: "/notifications", icon: Bell, badge: 3 },
   { name: "Product Repository", href: "/repository", icon: Database },
   { name: "Settings", href: "/settings", icon: Settings },
