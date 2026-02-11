@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
 import { MainLayout } from "@/components/layout/MainLayout";
+import { UserManagement } from "@/components/UserManagement";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -22,6 +23,7 @@ import {
   Settings as SettingsIcon,
   Sparkles,
   User,
+  Users,
 } from "lucide-react";
 
 export default function Settings() {
@@ -31,6 +33,11 @@ export default function Settings() {
     agentUpdates: true,
     weeklyDigest: false,
   });
+
+  // Get user role from localStorage
+  const userStr = localStorage.getItem("user");
+  const user = userStr ? JSON.parse(userStr) : null;
+  const isSuperAdmin = user?.role === "super_admin";
 
   return (
     <MainLayout
@@ -67,6 +74,12 @@ export default function Settings() {
                 <Lock className="h-4 w-4" />
                 Security
               </TabsTrigger>
+              {isSuperAdmin && (
+                <TabsTrigger value="users" className="gap-2">
+                  <Users className="h-4 w-4" />
+                  Users
+                </TabsTrigger>
+              )}
             </TabsList>
 
             {/* Profile Tab */}
@@ -342,6 +355,13 @@ export default function Settings() {
                 </div>
               </motion.div>
             </TabsContent>
+
+            {/* Users Tab - Super Admin Only */}
+            {isSuperAdmin && (
+              <TabsContent value="users">
+                <UserManagement />
+              </TabsContent>
+            )}
           </Tabs>
         </motion.div>
       </div>

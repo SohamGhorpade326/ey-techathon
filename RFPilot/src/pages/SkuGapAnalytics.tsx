@@ -112,6 +112,10 @@ export default function SkuGapAnalytics() {
   const fetchAllData = async () => {
     try {
       setLoading(true);
+      const token = localStorage.getItem("token");
+      const headers = {
+        Authorization: `Bearer ${token}`,
+      };
       const [
         summaryRes,
         domainRes,
@@ -122,14 +126,14 @@ export default function SkuGapAnalytics() {
         riskRes,
         insightsRes,
       ] = await Promise.all([
-        fetch(`${API_BASE}/summary`),
-        fetch(`${API_BASE}/domain-analysis`),
-        fetch(`${API_BASE}/spec-frequency`),
-        fetch(`${API_BASE}/match-distribution`),
-        fetch(`${API_BASE}/recommendations`),
-        fetch(`${API_BASE}/timeline`),
-        fetch(`${API_BASE}/risk-value`),
-        fetch(`${API_BASE}/insights`),
+        fetch(`${API_BASE}/summary`, { headers }),
+        fetch(`${API_BASE}/domain-analysis`, { headers }),
+        fetch(`${API_BASE}/spec-frequency`, { headers }),
+        fetch(`${API_BASE}/match-distribution`, { headers }),
+        fetch(`${API_BASE}/recommendations`, { headers }),
+        fetch(`${API_BASE}/timeline`, { headers }),
+        fetch(`${API_BASE}/risk-value`, { headers }),
+        fetch(`${API_BASE}/insights`, { headers }),
       ]);
 
       const summaryData = await summaryRes.json();

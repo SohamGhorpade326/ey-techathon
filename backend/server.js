@@ -8,6 +8,8 @@ import rfpRoutes from "./routes/rfps.js";
 import testingMatrixRoutes from "./routes/testingMatrix.js";
 import skuGapRoutes from "./routes/skuGap.routes.js";
 import skuGapAIRoutes from "./routes/skuGapAI.routes.js";
+import authRoutes from "./routes/auth.routes.js";
+import { seedAdmin } from "./utils/seedAdmin.js";
 
 dotenv.config();
 
@@ -17,9 +19,13 @@ app.use(express.json());
 
 mongoose
   .connect(process.env.MONGO_URI)
-  .then(() => console.log("✅ MongoDB Connected"))
+  .then(() => {
+    console.log("✅ MongoDB Connected");
+    seedAdmin();
+  })
   .catch((err) => console.error("Mongo Error:", err));
 
+app.use("/api/auth", authRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/rfps", rfpRoutes);
 app.use("/api/testing-matrix", testingMatrixRoutes);

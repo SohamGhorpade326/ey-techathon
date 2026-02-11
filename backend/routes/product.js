@@ -1,7 +1,13 @@
 import express from "express";
 import Product from "../models/Product.js";
+import { verifyToken } from "../middleware/auth.middleware.js";
+import { authorizeRoles } from "../middleware/role.middleware.js";
 
 const router = express.Router();
+
+// Apply auth middleware to all routes
+router.use(verifyToken);
+router.use(authorizeRoles("super_admin", "product"));
 
 // Get all products
 router.get("/", async (req, res) => {

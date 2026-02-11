@@ -16,10 +16,35 @@ export default function Login() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
-    // Simulate login
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    setIsLoading(false);
-    navigate("/dashboard");
+    
+    try {
+      const response = await fetch("http://localhost:5000/api/auth/login", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ email, password }),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        alert(data.message || "Login failed");
+        setIsLoading(false);
+        return;
+      }
+
+      // Store token and user info
+      localStorage.setItem("token", data.token);
+      localStorage.setItem("user", JSON.stringify(data.user));
+      
+      navigate("/dashboard");
+    } catch (error) {
+      console.error("Login error:", error);
+      alert("Connection error. Please check if backend is running.");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const features = [

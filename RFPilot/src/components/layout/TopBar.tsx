@@ -1,7 +1,10 @@
 import { motion } from "framer-motion";
-import { Bell, Search, User, ChevronRight } from "lucide-react";
+import { Bell, Search, User, ChevronRight, LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
+import { useNavigate } from "react-router-dom";
+import { useState, useEffect } from "react";
 
 interface TopBarProps {
   title: string;
@@ -9,6 +12,30 @@ interface TopBarProps {
 }
 
 export function TopBar({ title, breadcrumbs = [] }: TopBarProps) {
+  const navigate = useNavigate();
+  const [userRole, setUserRole] = useState<string>("");
+
+  useEffect(() => {
+    const user = localStorage.getItem("user");
+    if (user) {
+      const userData = JSON.parse(user);
+      setUserRole(userData.role || "");
+    }
+  }, []);
+
+  const handleLogout = () => {
+    localStorage.removeItem("token");
+    localStorage.removeItem("user");
+    navigate("/login");
+  };
+
+  const formatRole = (role: string) => {
+    return role
+      .split("_")
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(" ");
+  };
+
   return (
     <motion.header
       initial={{ opacity: 0, y: -20 }}
@@ -50,6 +77,12 @@ export function TopBar({ title, breadcrumbs = [] }: TopBarProps) {
           />
         </div>
 
+        {userRole && (
+          <Badge variant="secondary" className="hidden md:flex">
+            Logged in as: {formatRole(userRole)}
+          </Badge>
+        )}
+
         <Button variant="ghost" size="icon" className="relative">
           <Bell className="h-5 w-5" />
           <span className="absolute -top-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-destructive text-[10px] font-bold text-destructive-foreground">
@@ -60,7 +93,17 @@ export function TopBar({ title, breadcrumbs = [] }: TopBarProps) {
         <Button variant="ghost" size="icon" className="rounded-full">
           <User className="h-5 w-5" />
         </Button>
+
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={handleLogout}
+          title="Logout"
+        >
+          <LogOut className="h-5 w-5" />
+        </Button>
       </div>
     </motion.header>
   );
 }
+

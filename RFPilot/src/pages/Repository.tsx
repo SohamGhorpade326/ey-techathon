@@ -59,15 +59,23 @@ export default function Repository() {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
+  const getAuthHeaders = () => {
+    const token = localStorage.getItem("token");
+    return {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    };
+  };
+
   const loadProducts = () => {
-    fetch(API)
+    fetch(API, { headers: getAuthHeaders() })
       .then((res) => res.json())
       .then(setProducts)
       .catch(console.error);
   };
 
   const loadTestingMatrix = () => {
-    fetch(TESTING_API)
+    fetch(TESTING_API, { headers: getAuthHeaders() })
       .then((res) => res.json())
       .then(setTestingMatrix)
       .catch(console.error);
@@ -123,7 +131,7 @@ export default function Repository() {
 
     await fetch(API, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders(),
       body: JSON.stringify(payload),
     });
     resetForm();
@@ -140,7 +148,7 @@ export default function Repository() {
 
     await fetch(`${API}/${editProduct._id}`, {
       method: "PUT",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders(),
       body: JSON.stringify(payload),
     });
     resetForm();
@@ -150,7 +158,7 @@ export default function Repository() {
 
   const deleteProduct = async (id: string) => {
     if (!confirm("Delete this product permanently?")) return;
-    await fetch(`${API}/${id}`, { method: "DELETE" });
+    await fetch(`${API}/${id}`, { method: "DELETE", headers: getAuthHeaders() });
     loadProducts();
   };
 
@@ -172,7 +180,7 @@ export default function Repository() {
 
     await fetch(TESTING_API, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders(),
       body: JSON.stringify(payload),
     });
     resetTestForm();
@@ -191,7 +199,7 @@ export default function Repository() {
 
     await fetch(`${TESTING_API}/${editTest._id}`, {
       method: "PUT",
-      headers: { "Content-Type": "application/json" },
+      headers: getAuthHeaders(),
       body: JSON.stringify(payload),
     });
     resetTestForm();
@@ -201,7 +209,7 @@ export default function Repository() {
 
   const deleteTest = async (id: string) => {
     if (!confirm("Delete this test permanently?")) return;
-    await fetch(`${TESTING_API}/${id}`, { method: "DELETE" });
+    await fetch(`${TESTING_API}/${id}`, { method: "DELETE", headers: getAuthHeaders() });
     loadTestingMatrix();
   };
 
@@ -255,7 +263,7 @@ export default function Repository() {
           try {
             const res = await fetch(API, {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers: getAuthHeaders(),
               body: JSON.stringify(payload),
             });
             res.ok ? success++ : failed++;
