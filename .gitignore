@@ -23,3 +23,27 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Node
+node_modules/
+dist/
+
+# Python
+__pycache__/
+*.pyc
+
+# Env files
+.env
+backend/.env
+RFPPilot2/backend/.env
+
+# Gmail listener secrets
+gmail-rfp-alert/credentials.json
+gmail-rfp-alert/token.json
+gmail-rfp-alert/.state.json
+gmail-rfp-alert/.env
+gmail-rfp-alert/node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
