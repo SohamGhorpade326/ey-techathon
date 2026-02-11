@@ -11,8 +11,43 @@ _STORE = {
     "technical": {},
     "pricing": {},
     "compliance": [],
-    "proposal": ""
+    "proposal": "",
+    # Gmail ingestion (kept across pipeline runs)
+    "gmail_emails": [],
+    "notifications": []
 }
+
+
+def add_gmail_email(email_obj: Dict[str, Any]) -> bool:
+    """Add a Gmail email raw object (deduped by message_id). Returns True if inserted."""
+    message_id = str(email_obj.get("message_id") or "").strip()
+    if not message_id:
+        return False
+
+    with _lock:
+        existing = _STORE.get("gmail_emails", [])
+        if any(str(e.get("message_id")) == message_id for e in existing):
+            return False
+        existing.append(email_obj)
+        _STORE["gmail_emails"] = existing
+        return True
+
+
+def list_gmail_emails() -> List[Dict[str, Any]]:
+    with _lock:
+        return list(_STORE.get("gmail_emails", []))
+
+
+def add_notification(notification: Dict[str, Any]) -> None:
+    with _lock:
+        existing = _STORE.get("notifications", [])
+        existing.append(notification)
+        _STORE["notifications"] = existing
+
+
+def list_notifications() -> List[Dict[str, Any]]:
+    with _lock:
+        return list(_STORE.get("notifications", []))
 
 # SALES
 def save_sales_output(data: List[Dict[str, Any]]) -> None:

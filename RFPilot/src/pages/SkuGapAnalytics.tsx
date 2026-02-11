@@ -96,6 +96,7 @@ interface Insights {
 export default function SkuGapAnalytics() {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [domainAnalysis, setDomainAnalysis] = useState<DomainAnalysis[]>([]);
   const [specFrequency, setSpecFrequency] = useState<SpecFrequency[]>([]);
@@ -112,10 +113,22 @@ export default function SkuGapAnalytics() {
   const fetchAllData = async () => {
     try {
       setLoading(true);
-      const token = localStorage.getItem("token");
-      const headers = {
-        Authorization: `Bearer ${token}`,
-      };
+
+  setLoadError(null);
+
+  const token = localStorage.getItem("token");
+  const headers = {
+    Authorization: `Bearer ${token}`,
+  };
+
+  const safeJson = async (res: Response) => {
+    try {
+      return await res.json();
+    } catch {
+      return null;
+    }
+  };
+
       const [
         summaryRes,
         domainRes,
@@ -136,25 +149,50 @@ export default function SkuGapAnalytics() {
         fetch(`${API_BASE}/insights`, { headers }),
       ]);
 
-      const summaryData = await summaryRes.json();
-      const domainData = await domainRes.json();
-      const specData = await specRes.json();
-      const matchData = await matchRes.json();
-      const recoData = await recoRes.json();
-      const timeData = await timeRes.json();
-      const riskData = await riskRes.json();
-      const insightsData = await insightsRes.json();
+      const summaryData = await safeJson(summaryRes);
+      const domainData = await safeJson(domainRes);
+      const specData = await safeJson(specRes);
+      const matchData = await safeJson(matchRes);
+      const recoData = await safeJson(recoRes);
+      const timeData = await safeJson(timeRes);
+      const riskData = await safeJson(riskRes);
+      const insightsData = await safeJson(insightsRes);
 
-      setSummary(summaryData);
-      setDomainAnalysis(domainData);
-      setSpecFrequency(specData.slice(0, 10)); // Top 10
-      setMatchDistribution(matchData);
-      setRecommendations(recoData);
-      setTimeline(timeData);
-      setRiskValue(riskData);
-      setInsights(insightsData);
+      if (summaryData && typeof summaryData === "object") setSummary(summaryData as Summary);
+      if (Array.isArray(domainData)) setDomainAnalysis(domainData as DomainAnalysis[]);
+      if (Array.isArray(specData)) setSpecFrequency((specData as SpecFrequency[]).slice(0, 10)); // Top 10
+      if (matchData && typeof matchData === "object") setMatchDistribution(matchData as MatchDistribution);
+      if (Array.isArray(recoData)) setRecommendations(recoData as Recommendation[]);
+      if (Array.isArray(timeData)) setTimeline(timeData as Timeline[]);
+      if (riskData && typeof riskData === "object") setRiskValue(riskData as RiskValue);
+
+      // Only accept insights if it has the expected shape (prevents blank screen on error payloads)
+      if (
+        insightsData &&
+        typeof insightsData === "object" &&
+        typeof (insightsData as any).insights_text === "string"
+      ) {
+        setInsights(insightsData as Insights);
+      } else {
+        setInsights(null);
+      }
+
+      // If any endpoint failed (non-OK) or didn't parse, show a small warning.
+      const anyFailed =
+        !summaryRes.ok ||
+        !domainRes.ok ||
+        !specRes.ok ||
+        !matchRes.ok ||
+        !recoRes.ok ||
+        !timeRes.ok ||
+        !riskRes.ok ||
+        !insightsRes.ok;
+      if (anyFailed) {
+        setLoadError("Some analytics widgets failed to load. Refresh to retry.");
+      }
     } catch (error) {
       console.error("Error fetching SKU gap data:", error);
+      setLoadError("Unable to load SKU Gap Intelligence right now.");
     } finally {
       setLoading(false);
     }
@@ -207,6 +245,11 @@ export default function SkuGapAnalytics() {
 
   return (
     <div className="min-h-screen bg-background p-6 space-y-6">
+      {loadError && (
+        <div className="rounded-lg border border-border bg-card px-4 py-3 text-sm text-muted-foreground">
+          {loadError}
+        </div>
+      )}
       {/* Header */}
       <motion.div
         initial={{ opacity: 0, y: -20 }}
@@ -414,7 +457,7 @@ export default function SkuGapAnalytics() {
       </motion.div>
 
       {/* Row 4: AI Insights */}
-      {insights && (
+      {typeof insights?.insights_text === "string" && insights.insights_text.trim() && (
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}

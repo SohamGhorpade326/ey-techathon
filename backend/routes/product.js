@@ -11,8 +11,12 @@ router.use(authorizeRoles("super_admin", "product"));
 
 // Get all products
 router.get("/", async (req, res) => {
-  const products = await Product.find();
-  res.json(products);
+  try {
+    const products = await Product.find();
+    res.json(products);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Create new product (dynamic fields supported)

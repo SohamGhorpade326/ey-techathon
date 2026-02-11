@@ -97,7 +97,7 @@ const runSalesAgent = async () => {
   // -----------------------------
   const filtered = rfps.filter(
     (r) =>
-      r.title?.toLowerCase().includes(search.toLowerCase()) ||
+      r.rfp_title?.toLowerCase().includes(search.toLowerCase()) ||
       r.buyer?.toLowerCase().includes(search.toLowerCase())
   );
 

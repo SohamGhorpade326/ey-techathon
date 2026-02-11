@@ -13,17 +13,30 @@ import { seedAdmin } from "./utils/seedAdmin.js";
 
 dotenv.config();
 
+if (!process.env.MONGO_URI) {
+  console.error("❌ MONGO_URI is not set. Check backend/.env");
+  process.exit(1);
+}
+
+const mongoDbName = process.env.MONGO_DB_NAME;
+
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 mongoose
-  .connect(process.env.MONGO_URI)
+  .connect(process.env.MONGO_URI, mongoDbName ? { dbName: mongoDbName } : {})
   .then(() => {
-    console.log("✅ MongoDB Connected");
-    seedAdmin();
+    console.log(
+      `✅ MongoDB Connected${mongoDbName ? ` (db: ${mongoDbName})` : ""}`
+    );
+    seedAdmin(); // keep admin seeding
   })
   .catch((err) => console.error("Mongo Error:", err));
+
+mongoose.connection.on("error", (err) => {
+  console.error("Mongo Connection Error:", err);
+});
 
 app.use("/api/auth", authRoutes);
 app.use("/api/products", productRoutes);

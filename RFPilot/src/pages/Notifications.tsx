@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import { MainLayout } from "@/components/layout/MainLayout";
 import { Button } from "@/components/ui/button";
@@ -16,86 +16,58 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-const notifications = [
-  {
-    id: 1,
-    type: "critical",
-    title: "Response due in 5 days — high impact risk",
-    description: "RFP #1023 - State Electricity Board requires immediate attention. Delays significantly reduce win probability.",
-    time: "2 hours ago",
-    read: false,
-    source: "Master Agent",
-  },
-  {
-    id: 2,
-    type: "discovery",
-    title: "3 new RFPs discovered on XYZ PSU portal",
-    description: "Sales Agent identified matching opportunities in the Power Cable category.",
-    time: "4 hours ago",
-    read: false,
-    source: "Sales Agent",
-  },
-  {
-    id: 3,
-    type: "success",
-    title: "Spec matching complete for RFP 1023",
-    description: "Technical Agent matched 12/12 items with 91% average spec-match. Ready for review.",
-    time: "5 hours ago",
-    read: false,
-    source: "Technical Agent",
-  },
-  {
-    id: 4,
-    type: "warning",
-    title: "Low spec-match detected",
-    description: "Flexible Cable (FLX-EPR-3C-4) has only 68% spec-match. Consider alternative SKU.",
-    time: "5 hours ago",
-    read: true,
-    source: "Technical Agent",
-  },
-  {
-    id: 5,
-    type: "info",
-    title: "Pricing calculation complete",
-    description: "Pricing Agent estimated total bid value at ₹18.7M for RFP #1023.",
-    time: "6 hours ago",
-    read: true,
-    source: "Pricing Agent",
-  },
-  {
-    id: 6,
-    type: "discovery",
-    title: "High-value RFP detected",
-    description: "New tender worth ₹50M+ identified from Central Railways for Signalling Cables.",
-    time: "1 day ago",
-    read: true,
-    source: "Sales Agent",
-  },
-  {
-    id: 7,
-    type: "critical",
-    title: "Deadline reminder: 10 days remaining",
-    description: "RFP #1019 - NTPC Power Station submission deadline approaching.",
-    time: "1 day ago",
-    read: true,
-    source: "Master Agent",
-  },
-  {
-    id: 8,
-    type: "success",
-    title: "Proposal submitted successfully",
-    description: "RFP #1015 bid response has been marked as submitted.",
-    time: "2 days ago",
-    read: true,
-    source: "System",
-  },
-];
+const API = "http://127.0.0.1:8000";
+
+type NotificationItem = {
+  id: string;
+  type: string;
+  title: string;
+  description?: string;
+  received_timestamp?: string;
+  read?: boolean;
+  source?: string;
+};
+
+function formatRelativeTime(iso?: string) {
+  if (!iso) return "";
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return "";
+  const diffMs = Date.now() - t;
+  const diffMin = Math.max(0, Math.floor(diffMs / 60000));
+  if (diffMin < 1) return "just now";
+  if (diffMin < 60) return `${diffMin} min ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr} hours ago`;
+  const diffDays = Math.floor(diffHr / 24);
+  return `${diffDays} days ago`;
+}
 
 export default function Notifications() {
-  const [items, setItems] = useState(notifications);
+  const [items, setItems] = useState<NotificationItem[]>([]);
   const [filter, setFilter] = useState("all");
 
-  const markAsRead = (id: number) => {
+  const fetchNotifications = async () => {
+    try {
+      const res = await fetch(`${API}/notifications`);
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        setItems(data);
+      } else {
+        setItems([]);
+      }
+    } catch (e) {
+      console.error("Failed to fetch notifications", e);
+      setItems([]);
+    }
+  };
+
+  useEffect(() => {
+    fetchNotifications();
+    const t = setInterval(fetchNotifications, 15000);
+    return () => clearInterval(t);
+  }, []);
+
+  const markAsRead = (id: string) => {
     setItems((prev) =>
       prev.map((item) => (item.id === id ? { ...item, read: true } : item))
     );
@@ -105,7 +77,7 @@ export default function Notifications() {
     setItems((prev) => prev.map((item) => ({ ...item, read: true })));
   };
 
-  const deleteNotification = (id: number) => {
+  const deleteNotification = (id: string) => {
     setItems((prev) => prev.filter((item) => item.id !== id));
   };
 
@@ -134,17 +106,19 @@ export default function Notifications() {
         return "bg-agent-pricing/10 text-agent-pricing border-agent-pricing/30";
       case "Master Agent":
         return "bg-agent-master/10 text-agent-master border-agent-master/30";
+      case "gmail":
+        return "bg-muted text-muted-foreground";
       default:
         return "bg-muted text-muted-foreground";
     }
   };
 
-  const filteredItems = items.filter((item) => {
+  const filteredItems = useMemo(() => items.filter((item) => {
     if (filter === "all") return true;
     if (filter === "unread") return !item.read;
     if (filter === "critical") return item.type === "critical";
     return true;
-  });
+  }), [items, filter]);
 
   const unreadCount = items.filter((item) => !item.read).length;
   const criticalCount = items.filter((item) => item.type === "critical").length;
@@ -237,12 +211,14 @@ export default function Notifications() {
                   <div className="flex items-center gap-3">
                     <Badge
                       variant="outline"
-                      className={cn("text-xs", getAgentColor(item.source))}
+                      className={cn("text-xs", getAgentColor(item.source || ""))}
                     >
                       <Sparkles className="h-3 w-3 mr-1" />
-                      {item.source}
+                      {item.source || ""}
                     </Badge>
-                    <span className="text-xs text-muted-foreground">{item.time}</span>
+                    <span className="text-xs text-muted-foreground">
+                      {formatRelativeTime(item.received_timestamp)}
+                    </span>
                   </div>
                 </div>
                 <div className="flex items-center gap-2">

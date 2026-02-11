@@ -115,7 +115,7 @@ def _compute_days_remaining(deadline_str: str | None) -> int | None:
         return None
     now = datetime.now()
     delta = dt - now
-    return max(0, int(delta.total_seconds() // 86400))
+    return int(delta.total_seconds() // 86400)
 
 
 # ============================
@@ -363,11 +363,14 @@ def format_sales_for_frontend(raw: dict, index: int) -> dict:
     # Unknown deadline => don't force a fake priority.
     priority = "Medium"
     if isinstance(days_remaining, int):
-        priority = (
-            "Critical" if days_remaining <= 3
-            else "High" if days_remaining <= 10
-            else "Medium"
-        )
+        if days_remaining < 0:
+            priority = "Expired"
+        elif days_remaining <= 10:
+            priority = "Critical"
+        elif days_remaining <= 21:
+            priority = "High"
+        else:
+            priority = "Medium"
 
     # Get estimated_project_value and scope_items with fallback to realistic defaults
     estimated_value = raw.get("estimated_project_value", "")

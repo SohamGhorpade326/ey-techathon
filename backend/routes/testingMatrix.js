@@ -11,8 +11,12 @@ router.use(authorizeRoles("super_admin", "technical", "product"));
 
 // GET ALL
 router.get("/", async (req, res) => {
-  const data = await TestingMatrix.find();
-  res.json(data);
+  try {
+    const data = await TestingMatrix.find();
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // CREATE
