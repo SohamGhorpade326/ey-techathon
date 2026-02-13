@@ -5,11 +5,20 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
+import {
   AlertTriangle,
   Bell,
   CheckCircle2,
   Clock,
   Eye,
+  FileText,
   Search,
   Sparkles,
   Trash2,
@@ -23,6 +32,8 @@ type NotificationItem = {
   type: string;
   title: string;
   description?: string;
+  body?: string;
+  message_id?: string;
   received_timestamp?: string;
   read?: boolean;
   source?: string;
@@ -45,6 +56,7 @@ function formatRelativeTime(iso?: string) {
 export default function Notifications() {
   const [items, setItems] = useState<NotificationItem[]>([]);
   const [filter, setFilter] = useState("all");
+  const [selectedMail, setSelectedMail] = useState<NotificationItem | null>(null);
 
   const fetchNotifications = async () => {
     try {
@@ -174,9 +186,12 @@ export default function Notifications() {
           transition={{ delay: 0.2 }}
           className="space-y-3"
         >
-          {filteredItems.map((item, index) => (
+          {filteredItems.map((item, index) => {
+            // Use message_id as key for proper deduplication, fallback to id
+            const itemKey = item.message_id || item.id;
+            return (
             <motion.div
-              key={item.id}
+              key={itemKey}
               initial={{ opacity: 0, x: -20 }}
               animate={{ opacity: 1, x: 0 }}
               transition={{ delay: index * 0.05 }}
@@ -222,6 +237,32 @@ export default function Notifications() {
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
+                  {item.body && (
+                    <Dialog>
+                      <DialogTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => setSelectedMail(item)}
+                        >
+                          <FileText className="h-4 w-4" />
+                        </Button>
+                      </DialogTrigger>
+                      <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+                        <DialogHeader>
+                          <DialogTitle>{item.title}</DialogTitle>
+                          <DialogDescription>
+                            From: {item.description}
+                          </DialogDescription>
+                        </DialogHeader>
+                        <div className="mt-4">
+                          <div className="text-sm text-muted-foreground whitespace-pre-wrap">
+                            {item.body}
+                          </div>
+                        </div>
+                      </DialogContent>
+                    </Dialog>
+                  )}
                   {!item.read && (
                     <Button
                       variant="ghost"
@@ -242,7 +283,8 @@ export default function Notifications() {
                 </div>
               </div>
             </motion.div>
-          ))}
+            );
+          })}
 
           {filteredItems.length === 0 && (
             <div className="text-center py-12">

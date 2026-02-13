@@ -41,6 +41,8 @@ export default function Analysis() {
   const [selectedItemForComparison, setSelectedItemForComparison] = useState<any>(null);
   const [showOverride, setShowOverride] = useState(false);
   const [overrideComment, setOverrideComment] = useState("");
+  const [showJustification, setShowJustification] = useState(false);
+  const [selectedItemForJustification, setSelectedItemForJustification] = useState<any>(null);
 
   useEffect(() => {
     fetch(`${API}/technical/output`)
@@ -93,6 +95,11 @@ export default function Analysis() {
   const showComparisonMatrix = (item: any) => {
     setSelectedItemForComparison(item);
     setShowComparison(true);
+  };
+
+  const showJustificationDialog = (item: any) => {
+    setSelectedItemForJustification(item);
+    setShowJustification(true);
   };
 
   const getMatchColor = (match: number) => {
@@ -212,6 +219,17 @@ export default function Analysis() {
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex items-center justify-end gap-2">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            showJustificationDialog(item);
+                          }}
+                          title="View AI Justification"
+                        >
+                          <Sparkles className="h-4 w-4 text-primary" />
+                        </Button>
                         {item.comparison_matrix && (
                           <Button
                             variant="ghost"
@@ -321,6 +339,73 @@ export default function Analysis() {
           </div>
         </motion.div>
       </div>
+      
+      {/* XAI Justification Dialog */}
+      <Dialog open={showJustification} onOpenChange={setShowJustification}>
+        <DialogContent className="max-w-3xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Sparkles className="h-5 w-5 text-primary" />
+              Explainable AI: Match Justification
+            </DialogTitle>
+          </DialogHeader>
+          {selectedItemForJustification && (
+            <div className="space-y-6">
+              {/* Primary Match Justification */}
+              <div className="bg-success/5 border border-success/30 rounded-lg p-4">
+                <h3 className="font-semibold text-success mb-2 flex items-center gap-2">
+                  <CheckCircle2 className="h-4 w-4" />
+                  Primary Match: {selectedItemForJustification.best_match_sku}
+                </h3>
+                <div className="text-sm text-muted-foreground leading-relaxed whitespace-pre-line space-y-2">
+                  {selectedItemForJustification.match_justification?.split('**').map((part: string, idx: number) => (
+                    idx % 2 === 1 ? <strong key={idx} className="text-foreground">{part}</strong> : <span key={idx}>{part}</span>
+                  ))}
+                </div>
+              </div>
+
+              {/* Alternative Matches with Delta Explanations */}
+              {selectedItemForJustification.top_3_skus && selectedItemForJustification.top_3_skus.length > 1 && (
+                <div>
+                  <h3 className="font-semibold text-foreground mb-3">Alternative Matches</h3>
+                  <div className="space-y-3">
+                    {selectedItemForJustification.top_3_skus.slice(1).map((alt: any, idx: number) => (
+                      <div key={alt.sku_code} className="bg-muted/30 border border-border rounded-lg p-4">
+                        <div className="flex items-start justify-between mb-2">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-sm font-medium">{alt.sku_code}</span>
+                            <Badge className={cn("text-xs border", getMatchColor(alt.spec_match_percent))}>
+                              {alt.spec_match_percent?.toFixed(0)}%
+                            </Badge>
+                          </div>
+                          <Badge variant="outline" className="text-xs">
+                            Alternative #{idx + 2}
+                          </Badge>
+                        </div>
+                        <div className="text-sm text-muted-foreground leading-relaxed whitespace-pre-line">
+                          {alt.delta_explanation?.split('**').map((part: string, i: number) => (
+                            i % 2 === 1 ? <strong key={i} className="text-foreground">{part}</strong> : <span key={i}>{part}</span>
+                          )) || "Alternative SKU with lower match score."}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Technical Details */}
+              <div className="border-t pt-4">
+                <p className="text-xs text-muted-foreground">
+                  <strong>Note:</strong> These justifications are generated by the Technical Agent's Parameter Rule Engine 
+                  and SBERT semantic matching system. Vector similarity scores confirm the alignment between RFP requirements 
+                  and catalog specifications.
+                </p>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+      
       {/* Comparison Dialog */}
       <Dialog open={showComparison} onOpenChange={setShowComparison}>
         <DialogContent className="max-w-5xl max-h-[80vh] overflow-y-auto">

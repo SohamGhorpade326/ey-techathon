@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import process from "process";
 import readline from "readline";
+import crypto from "crypto";
 
 import dotenv from "dotenv";
 import { google } from "googleapis";
@@ -22,6 +23,15 @@ const BACKEND_URL = process.env.BACKEND_URL || "http://127.0.0.1:8000";
 const INGEST_ENDPOINT = `${BACKEND_URL}/integrations/gmail/rfp-event`;
 
 const GMAIL_USER = process.env.GMAIL_USER || "me";
+
+// 10-minute time window for recent RFP emails
+const TEN_MINUTES_MS = 10 * 60 * 1000;
+
+function isWithinTenMinutes(emailInternalDate) {
+  const now = Date.now();
+  const emailTime = Number(emailInternalDate); // Gmail internalDate is epoch milliseconds
+  return (now - emailTime) <= TEN_MINUTES_MS;
+}
 
 // Pub/Sub identifiers used by Gmail push notifications
 const GCP_PROJECT_ID = process.env.GCP_PROJECT_ID;
@@ -129,6 +139,13 @@ function extractEmail(fromHeader) {
   if (!fromHeader) return "";
   const match = String(fromHeader).match(/<([^>]+)>/);
   return match ? match[1] : String(fromHeader);
+}
+
+function createStableEmailId(sender, subject, date) {
+  // Create a content-based ID to deduplicate emails sent to self
+  // (Gmail creates separate message IDs for Sent and Inbox)
+  const basis = `${sender}|${subject}|${date}`;
+  return crypto.createHash('md5').update(basis).digest('hex').substring(0, 16);
 }
 
 async function postToBackend(event) {
@@ -274,20 +291,21 @@ async function bootstrapRecentMessages(gmail) {
   }
 }
 
-async function processHistory(gmail, state, historyId) {
-  // If we don't have a checkpoint yet, do a one-time bootstrap so we don't miss
-  // the very first real email event.
+async function processHistory(gmail, state, historyId, processedEmails) {
+  // DISABLED: Bootstrap was causing duplicate notifications from old emails
+  // Only process NEW messages going forward
   if (!state.lastHistoryId) {
-    await bootstrapRecentMessages(gmail);
+    // Just set the checkpoint without fetching old emails
     state.lastHistoryId = String(historyId);
     safeJsonWrite(STATE_PATH, state);
+    debugLog("First run: Set checkpoint without bootstrapping old emails");
     return;
   }
 
   const startHistoryId = state.lastHistoryId;
 
   let pageToken = undefined;
-  const messageIds = [];
+  const messageIds = new Set(); // Use Set to automatically deduplicate message IDs
 
   while (true) {
     const resp = await gmail.users.history.list({
@@ -301,7 +319,7 @@ async function processHistory(gmail, state, historyId) {
     for (const h of history) {
       const added = h.messagesAdded || [];
       for (const m of added) {
-        if (m.message?.id) messageIds.push(m.message.id);
+        if (m.message?.id) messageIds.add(m.message.id); // Use .add() for Set
       }
     }
 
@@ -313,7 +331,8 @@ async function processHistory(gmail, state, historyId) {
   state.lastHistoryId = String(historyId);
   safeJsonWrite(STATE_PATH, state);
 
-  for (const id of messageIds) {
+  // Convert Set to Array for iteration
+  for (const id of Array.from(messageIds)) {
     try {
       const msg = await gmail.users.messages.get({
         userId: GMAIL_USER,
@@ -321,27 +340,60 @@ async function processHistory(gmail, state, historyId) {
         format: "full",
       });
 
-      const headers = msg.data.payload?.headers || [];
-      const subject = headers.find((h) => h.name === "Subject")?.value || "";
-      const from = headers.find((h) => h.name === "From")?.value || "";
-      const date = headers.find((h) => h.name === "Date")?.value || "";
+      // FIX 1: ONLY process INBOX messages (skip SENT)
+      const labelIds = msg.data.labelIds || [];
+      if (!labelIds.includes("INBOX")) {
+        debugLog("Skipping non-INBOX message:", id);
+        continue;
+      }
 
+      // FIX 2: 10-MINUTE TIME WINDOW - Only process recent emails
+      const internalDate = msg.data.internalDate; // Gmail epoch milliseconds
+      if (!isWithinTenMinutes(internalDate)) {
+        debugLog("Skipping old message (older than 10 minutes):", id);
+        continue;
+      }
+
+      // TESTING MODE: Deduplication temporarily disabled for multiple test emails
+      const messageId = msg.data.id;
+      // if (processedEmails.has(messageId)) {
+      //   debugLog("Skipping duplicate messageId:", messageId);
+      //   continue;
+      // }
+      // processedEmails.add(messageId);
+
+      // FIX 3: Extract subject correctly from headers
+      const headers = msg.data.payload?.headers || [];
+      const headersMap = {};
+      headers.forEach(h => {
+        if (h.name) headersMap[h.name] = h.value || "";
+      });
+      const subject = headersMap["Subject"] || "No Subject";
+      const from = headersMap["From"] || "";
+      const date = headersMap["Date"] || "";
+
+      // FIX 4: Store FULL body (decoded)
       const body_text = extractBodyText(msg.data.payload);
       if (!isTenderEmail(subject, body_text)) continue;
 
       const sender = extractEmail(from);
-      const timestamp = date ? new Date(date).toISOString() : new Date().toISOString();
+      const timestamp = date ? new Date(date).toISOString() : new Date(Number(internalDate)).toISOString();
+      const snippet = msg.data.snippet || "";
 
-      debugLog("History match:", { subject, sender, timestamp });
+      debugLog("Recent RFP match (within 10 min):", { messageId, subject, sender, timestamp });
+      
+      // Send full data including messageId, snippet, and complete body
       await postToBackend({
-        message_id: id,
+        message_id: messageId,
         sender,
         subject,
         body_text,
+        snippet,
         received_timestamp: timestamp,
       });
-    } catch {
-      // Fail silently.
+    } catch (e) {
+      // Log errors in debug mode
+      debugLog("Error processing message:", e?.message || e);
     }
   }
 }
@@ -369,6 +421,14 @@ async function startSubscriber(gmail) {
 
   const state = safeJsonRead(STATE_PATH, { lastHistoryId: null });
 
+  // Track processed historyIds to prevent duplicate processing from Pub/Sub redelivery
+  const processedHistoryIds = new Set();
+  const MAX_HISTORY_CACHE = 1000; // Limit memory usage
+  
+  // Track processed emails by content to prevent duplicate notifications for self-sent emails
+  const processedEmails = new Set();
+  const MAX_EMAIL_CACHE = 500; // Limit memory usage
+
   // Optional: keep watch alive periodically (Gmail watch expires).
   const shouldRenewWatch = process.argv.includes("--watch");
   if (shouldRenewWatch) {
@@ -390,12 +450,39 @@ async function startSubscriber(gmail) {
         return;
       }
 
-      debugLog("Pub/Sub event historyId=", String(historyId));
+      const historyIdStr = String(historyId);
+      
+      // Deduplicate: skip if we've already processed this historyId
+      if (processedHistoryIds.has(historyIdStr)) {
+        debugLog("Skipping duplicate historyId=", historyIdStr);
+        message.ack();
+        return;
+      }
 
-      await processHistory(gmail, state, String(historyId));
+      debugLog("Pub/Sub event historyId=", historyIdStr);
+      
+      // Mark as processed before processing to handle concurrent deliveries
+      processedHistoryIds.add(historyIdStr);
+      
+      // Memory management: clear oldest entries if cache grows too large
+      if (processedHistoryIds.size > MAX_HISTORY_CACHE) {
+        const toDelete = Array.from(processedHistoryIds).slice(0, MAX_HISTORY_CACHE / 2);
+        toDelete.forEach(id => processedHistoryIds.delete(id));
+        debugLog(`Cleared ${toDelete.length} old historyIds from cache`);
+      }
+      
+      // Memory management for email cache
+      if (processedEmails.size > MAX_EMAIL_CACHE) {
+        const toDelete = Array.from(processedEmails).slice(0, MAX_EMAIL_CACHE / 2);
+        toDelete.forEach(id => processedEmails.delete(id));
+        debugLog(`Cleared ${toDelete.length} old email IDs from cache`);
+      }
+
+      await processHistory(gmail, state, historyIdStr, processedEmails);
       message.ack();
-    } catch {
-      // Fail silently; ack to avoid retries that may spike latency.
+    } catch (e) {
+      // Log errors in debug mode, ack to avoid retries that may spike latency
+      debugLog("Error in subscription handler:", e?.message || e);
       try {
         message.ack();
       } catch {
@@ -404,9 +491,9 @@ async function startSubscriber(gmail) {
     }
   });
 
-  subscription.on("error", () => {
-    // Fail silently (process stays up)
-    debugLog("Pub/Sub subscription error");
+  subscription.on("error", (e) => {
+    // Log error in debug mode
+    debugLog("Pub/Sub subscription error:", e?.message || e);
   });
 }
 

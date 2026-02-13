@@ -22,7 +22,7 @@ import { Button } from "@/components/ui/button";
 
 // Initialize Groq with your provided key
 const groq = new Groq({ 
-  apiKey: "",
+  apiKey: import.meta.env.VITE_GROQ_API_KEY,
   dangerouslyAllowBrowser: true 
 });
 

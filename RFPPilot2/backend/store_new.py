@@ -38,16 +38,94 @@ def list_gmail_emails() -> List[Dict[str, Any]]:
         return list(_STORE.get("gmail_emails", []))
 
 
-def add_notification(notification: Dict[str, Any]) -> None:
+def add_notification(notification: Dict[str, Any]) -> bool:
+    """Add a notification (deduped by message_id if present). Returns True if inserted."""
     with _lock:
         existing = _STORE.get("notifications", [])
+        message_id = notification.get("message_id")
+        
+        # Deduplicate by message_id for Gmail notifications
+        if message_id:
+            if any(n.get("message_id") == message_id for n in existing):
+                return False
+        
         existing.append(notification)
         _STORE["notifications"] = existing
+        return True
 
 
 def list_notifications() -> List[Dict[str, Any]]:
     with _lock:
         return list(_STORE.get("notifications", []))
+
+
+# Track which Gmail emails have been processed by sales agent
+def mark_gmail_email_processed(message_id: str) -> None:
+    """Mark a Gmail email as processed by sales agent"""
+    with _lock:
+        processed = _STORE.get("processed_gmail_ids", set())
+        processed.add(message_id)
+        _STORE["processed_gmail_ids"] = processed
+
+def is_gmail_email_processed(message_id: str) -> bool:
+    """Check if a Gmail email has already been processed"""
+    with _lock:
+        processed = _STORE.get("processed_gmail_ids", set())
+        return message_id in processed
+
+def get_unprocessed_gmail_emails() -> List[Dict[str, Any]]:
+    """Get Gmail emails from the last 10 minutes (time-based, not processed flag)"""
+    from datetime import datetime, timedelta, timezone
+    
+    with _lock:
+        all_emails = _STORE.get("gmail_emails", [])
+        print(f"[Gmail Store] Total Gmail emails in store: {len(all_emails)}")
+        
+        # Use timezone-aware datetime for proper comparison
+        now = datetime.now(timezone.utc)
+        ten_minutes_ago = now - timedelta(minutes=10)
+        
+        recent_emails = []
+        for e in all_emails:
+            # Parse received_timestamp
+            timestamp_str = e.get("received_timestamp")
+            if not timestamp_str:
+                print(f"[Gmail Store] Skipping email with no timestamp: {e.get('subject', 'Unknown')}")
+                continue
+            try:
+                # Parse ISO timestamp (handles both 'Z' and '+00:00' formats)
+                email_time = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
+                
+                # Make sure email_time is timezone-aware
+                if email_time.tzinfo is None:
+                    email_time = email_time.replace(tzinfo=timezone.utc)
+                
+                age_minutes = (now - email_time).total_seconds() / 60
+                print(f"[Gmail Store] Email '{e.get('subject', 'Unknown')[:50]}' age: {age_minutes:.1f} min")
+                
+                if email_time >= ten_minutes_ago:
+                    recent_emails.append(e)
+                    print(f"[Gmail Store] ✓ Including email (within 10 min window)")
+                else:
+                    print(f"[Gmail Store] ✗ Skipping email (older than 10 min)")
+            except Exception as ex:
+                print(f"[Gmail Store] Error parsing timestamp '{timestamp_str}': {ex}")
+                continue
+        
+        print(f"[Gmail Store] Returning {len(recent_emails)} recent emails (last 10 min)")
+        return recent_emails
+
+def clear_notifications() -> None:
+    """Clear all notifications"""
+    with _lock:
+        _STORE["notifications"] = []
+
+def clear_gmail_data() -> None:
+    """Clear all Gmail emails, processed IDs, and notifications"""
+    with _lock:
+        _STORE["gmail_emails"] = []
+        _STORE["processed_gmail_ids"] = set()
+        _STORE["notifications"] = []
 
 # SALES
 def save_sales_output(data: List[Dict[str, Any]]) -> None:
@@ -112,3 +190,4 @@ def clear_all() -> None:
         _STORE["pricing"] = {}
         _STORE["compliance"] = []
         _STORE["proposal"] = ""
+        # Note: Gmail emails, processed IDs, and notifications persist across runs

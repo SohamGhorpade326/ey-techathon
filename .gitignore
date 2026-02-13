@@ -34,7 +34,9 @@ __pycache__/
 
 # Env files
 .env
+.env.local
 backend/.env
+RFPPilot/.env
 RFPPilot2/backend/.env
 
 # Gmail listener secrets
@@ -43,6 +45,11 @@ gmail-rfp-alert/token.json
 gmail-rfp-alert/.state.json
 gmail-rfp-alert/.env
 gmail-rfp-alert/node_modules/
+
+# RFP PDFs and cached data
+RFPPilot2/backend/*.pdf
+RFPPilot2/backend/llm_cache.json
+RFPPilot2/backend/gmail_*.pdf
 
 # OS
 .DS_Store

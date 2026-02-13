@@ -13,6 +13,18 @@ import {
 } from "@/components/ui/table";
 import { Input } from "@/components/ui/input";
 import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import {
   AlertTriangle,
   CheckCircle2,
   DollarSign,
@@ -20,6 +32,7 @@ import {
   FileText,
   Sparkles,
   Loader2,
+  Info,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -29,6 +42,8 @@ export default function Pricing() {
   const [items, setItems] = useState<any[]>([]);
   const [pricingData, setPricingData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [showRationale, setShowRationale] = useState(false);
+  const [selectedItemRationale, setSelectedItemRationale] = useState<string>("");
 
   useEffect(() => {
     fetch(`${API}/pricing/output`)
@@ -113,6 +128,11 @@ export default function Pricing() {
 
   const highRiskItems = items.filter((item) => item.risk === "High");
   const mediumRiskItems = items.filter((item) => item.risk === "Medium");
+
+  const showItemRationale = (rationale: string) => {
+    setSelectedItemRationale(rationale);
+    setShowRationale(true);
+  };
 
   return (
     <MainLayout
@@ -218,13 +238,36 @@ export default function Pricing() {
                       </div>
                     </TableCell>
                     <TableCell className="text-right font-mono">
-                      ₹{item.unit_price?.toLocaleString()}
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <div className="flex items-center justify-end gap-1">
+                              <span>₹{item.unit_price?.toLocaleString()}</span>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-5 w-5 p-0"
+                                onClick={() => item.pricing_rationale && showItemRationale(item.pricing_rationale)}
+                              >
+                                <Info className="h-3 w-3 text-muted-foreground hover:text-primary" />
+                              </Button>
+                            </div>
+                          </TooltipTrigger>
+                          <TooltipContent side="left" className="max-w-xs">
+                            <p className="text-xs">Click info icon to view pricing justification</p>
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
                     </TableCell>
                     <TableCell className="text-right font-mono">
-                      ₹{item.material_total?.toLocaleString()}
+                      <div className="flex items-center justify-end gap-1">
+                        <span>₹{item.material_total?.toLocaleString()}</span>
+                      </div>
                     </TableCell>
                     <TableCell className="text-right font-mono">
-                      ₹{item.testing_cost?.toLocaleString()}
+                      <div className="flex items-center justify-end gap-1">
+                        <span>₹{item.testing_cost?.toLocaleString()}</span>
+                      </div>
                     </TableCell>
                     <TableCell className="text-right font-mono font-medium">
                       ₹{item.line_total?.toLocaleString()}
@@ -290,6 +333,17 @@ export default function Pricing() {
             <p className="text-3xl font-bold font-mono text-primary">
               ₹{grandTotal.toLocaleString()}
             </p>
+            {pricingData?.totals_rationale && (
+              <Button
+                variant="outline"
+                size="sm"
+                className="mt-3 w-full"
+                onClick={() => setShowRationale(true)}
+              >
+                <Sparkles className="h-3 w-3 mr-2" />
+                View Valuation Rationale
+              </Button>
+            )}
           </div>
         </motion.div>
 
@@ -315,6 +369,98 @@ export default function Pricing() {
           </div>
         </motion.div>
       </div>
+
+      {/* XAI Pricing Rationale Dialog - Individual Item */}
+      <Dialog open={showRationale && !!selectedItemRationale} onOpenChange={(open) => {
+        if (!open) setSelectedItemRationale("");
+        setShowRationale(open);
+      }}>
+        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Info className="h-5 w-5 text-primary" />
+              Pricing Justification
+            </DialogTitle>
+          </DialogHeader>
+          <div className="bg-info/5 border border-info/30 rounded-lg p-4">
+            <div className="text-sm text-foreground leading-relaxed whitespace-pre-line space-y-2">
+              {selectedItemRationale?.split('**').map((part: string, idx: number) => (
+                idx % 2 === 1 ? <strong key={idx} className="text-primary">{part}</strong> : <span key={idx}>{part}</span>
+              ))}
+            </div>
+          </div>
+          <div className="border-t pt-4">
+            <p className="text-xs text-muted-foreground">
+              Pricing is retrieved from the validated Product & Pricing Repository. Testing costs are calculated 
+              based on mandatory compliance tests from the Test Data catalog.
+            </p>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* XAI Totals Rationale Dialog */}
+      <Dialog open={showRationale && !selectedItemRationale} onOpenChange={setShowRationale}>
+        <DialogContent className="max-w-3xl max-h-[80vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Sparkles className="h-5 w-5 text-primary" />
+              Explainable AI: Valuation Rationale
+            </DialogTitle>
+          </DialogHeader>
+          {pricingData?.totals_rationale && (
+            <div className="space-y-6">
+              {/* Material Total Justification */}
+              <div className="bg-primary/5 border border-primary/30 rounded-lg p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <DollarSign className="h-4 w-4 text-primary" />
+                  <h3 className="font-semibold text-primary">Material Cost Justification</h3>
+                </div>
+                <div className="text-sm text-muted-foreground leading-relaxed whitespace-pre-line space-y-2">
+                  {pricingData.totals_rationale.material_total_justification?.split('**').map((part: string, idx: number) => (
+                    idx % 2 === 1 ? <strong key={idx} className="text-foreground">{part}</strong> : <span key={idx}>{part}</span>
+                  ))}
+                </div>
+              </div>
+
+              {/* Testing Total Justification */}
+              <div className="bg-info/5 border border-info/30 rounded-lg p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <Calculator className="h-4 w-4 text-info" />
+                  <h3 className="font-semibold text-info">Testing Cost Justification</h3>
+                </div>
+                <div className="text-sm text-muted-foreground leading-relaxed whitespace-pre-line space-y-2">
+                  {pricingData.totals_rationale.testing_total_justification?.split('**').map((part: string, idx: number) => (
+                    idx % 2 === 1 ? <strong key={idx} className="text-foreground">{part}</strong> : <span key={idx}>{part}</span>
+                  ))}
+                </div>
+              </div>
+
+              {/* Grand Total Justification */}
+              <div className="bg-success/5 border border-success/30 rounded-lg p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <FileText className="h-4 w-4 text-success" />
+                  <h3 className="font-semibold text-success">Grand Total Justification</h3>
+                </div>
+                <div className="text-sm text-muted-foreground leading-relaxed whitespace-pre-line space-y-2">
+                  {pricingData.totals_rationale.grand_total_justification?.split('**').map((part: string, idx: number) => (
+                    idx % 2 === 1 ? <strong key={idx} className="text-foreground">{part}</strong> : <span key={idx}>{part}</span>
+                  ))}
+                </div>
+              </div>
+
+              {/* Footer Note */}
+              <div className="border-t pt-4">
+                <p className="text-xs text-muted-foreground">
+                  <strong>Audit Note:</strong> These justifications are generated by the Pricing Agent's automated 
+                  valuation system. All costs are traceable to the Product Catalog and Test Data collections in MongoDB, 
+                  ensuring full transparency and audit compliance. These rationales are for internal dashboard use only 
+                  and are NOT included in the final proposal document.
+                </p>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </MainLayout>
   );
 }

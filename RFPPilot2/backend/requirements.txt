@@ -13,3 +13,4 @@ torch
 sentence-transformers
 scikit-learn
 sympy
+sendgrid

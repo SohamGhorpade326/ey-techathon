@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 import threading
 import uuid
@@ -7,8 +7,18 @@ from concurrent.futures import ThreadPoolExecutor
 import re
 import hashlib
 from datetime import datetime
+import base64
+import os
+from dotenv import load_dotenv
+import smtplib
+from email.message import EmailMessage
+from email.utils import formataddr
+import mimetypes
 
 from pydantic import BaseModel
+
+# Load environment variables
+load_dotenv()
 
 from store_new import (
     save_sales_output,
@@ -27,8 +37,21 @@ from store_new import (
     add_gmail_email,
     list_gmail_emails,
     add_notification,
-    list_notifications
+    list_notifications,
+    get_unprocessed_gmail_emails,
+    mark_gmail_email_processed,
+    clear_notifications,
+    clear_gmail_data
 )
+
+# Pydantic models for request bodies
+class ProposalEditRequest(BaseModel):
+    updated_bid: str
+
+class CoverLetterRequest(BaseModel):
+    buyer: str
+    rfp_title: str
+    rfp_id: str = ""
 
 app = FastAPI(title="Agentic RFP Backend")
 
@@ -73,13 +96,13 @@ def warmup_pipeline():
     """Warm up browser, embeddings, and MongoDB to eliminate first-request latency"""
     rfp_module = load_rfp_module()
     
-    print("[Warmup] Starting browser warmup...")
+    print("[Warmup] Starting browser warmup (persistent page init)...")
     try:
-        # Warm up Playwright browser (actually open and close a page)
-        page = rfp_module._BROWSER.new_page()
+        # Initialize persistent page in THIS thread (worker thread) where it will be used
+        # This avoids greenlet thread conflicts and warms up the browser
+        page = rfp_module._init_browser()  # Returns persistent page
         page.goto("about:blank")
-        page.close()
-        print("[Warmup] ✅ Browser warmed up")
+        print("[Warmup] ✅ Persistent browser page initialized and ready")
     except Exception as e:
         print(f"[Warmup] ⚠️ Browser warmup failed: {e}")
     
@@ -102,9 +125,24 @@ def warmup_pipeline():
 
 @app.on_event("startup")
 async def startup_event():
-    # Fire-and-forget warmup
+    # 🚀 EAGER MODULE LOAD: Ensure embeddings loaded before declaring startup complete
+    print("[Startup] 🚀 Loading RFP module with global initializations...")
+    
+    # Load module synchronously to ensure embeddings initialization complete
+    # Browser page will lazy-load on first use in worker thread (persistent page pattern)
+    rfp_module = load_rfp_module()
+    
+    # Verify critical components are ready
+    if rfp_module.SKU_EMBEDDINGS is not None:
+        print(f"[Startup] ✅ SKU embeddings ready ({len(rfp_module.SKU_EMBEDDINGS)} embeddings)")
+    else:
+        print("[Startup] ⚠️ SKU embeddings not loaded")
+    
+    print("[Startup] ✅ Persistent browser page will initialize on first request (lazy-load)")
+    
+    # Fire-and-forget warmup for additional checks
     _pipeline_executor.submit(warmup_pipeline)
-    print("[Startup] Pipeline warmup started in background")
+    print("[Startup] 🚀 Application startup complete - embeddings pre-loaded, persistent page pattern enabled")
 
 
 # Background runner
@@ -118,454 +156,136 @@ def run_pipeline_bg(task_id: str):
         
         state = {}
         
-        # Sales Agent
+        # Sales Agent (process website PDFs first)
         state = rfp_module.sales_agent_node(state)
-
-        # ------------------------------------------------------------------
-        # Gmail integration layer (NO agent modifications)
-        # - Convert stored Gmail emails -> RFP objects in the same schema that
-        #   downstream nodes expect (i.e., Sales Agent output schema)
-        # - Merge with website-derived RFPs
-        # ------------------------------------------------------------------
         sales_data = state.get("sales_output", [])
 
-        def _stable_id_fallback(message_id: str, subject: str, body_text: str) -> str:
-            basis = (message_id or "") + "|" + (subject or "") + "|" + (body_text or "")
-            digest = hashlib.md5(basis.encode("utf-8", errors="ignore")).hexdigest()[:10]
-            return f"GMAIL-{digest}"
+        # ------------------------------------------------------------------
+        # Gmail Integration: Delegate to AI module for robust processing
+        # - Removes manual regex extraction
+        # - Uses LLM-based extraction with Ground Truth validation
+        # - Ensures domain-intelligent matching for MEDC power cables
+        # ------------------------------------------------------------------
+        gmail_emails = get_unprocessed_gmail_emails()
+        gmail_sales_data = []
+        gmail_extracted_items_map = {}  # Map rfp_id -> extracted_item_list
+        gmail_text_cache = {}  # Map rfp_id -> full text for Technical Agent
 
-        _MONTHS = {
-            "jan": 1,
-            "january": 1,
-            "feb": 2,
-            "february": 2,
-            "mar": 3,
-            "march": 3,
-            "apr": 4,
-            "april": 4,
-            "may": 5,
-            "jun": 6,
-            "june": 6,
-            "jul": 7,
-            "july": 7,
-            "aug": 8,
-            "august": 8,
-            "sep": 9,
-            "sept": 9,
-            "september": 9,
-            "oct": 10,
-            "october": 10,
-            "nov": 11,
-            "november": 11,
-            "dec": 12,
-            "december": 12,
-        }
-
-        def _normalize_deadline_for_priority(deadline_str: Optional[str]) -> Optional[str]:
-            if not deadline_str:
-                return None
-            s = str(deadline_str).strip()
-            if not s:
-                return None
-
-            # Normalize common punctuation/spaces.
-            s = s.replace("\u2013", "-").replace("\u2014", "-")
-            s = s.replace("|", " ")
-            s = re.sub(r"\s+", " ", s).strip()
-
-            # Prefer extracting a date/time substring if the line contains extra words.
-            # Supports:
-            # - 20 Feb 2026, 5:00 PM IST
-            # - 20 Feb 2026
-            # - 20/02/2026 17:00
-            # - 20-02-2026
-            month_names = r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t)?(?:ember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
-
-            # 1) Day Month Year (optionally time)
-            m = re.search(
-                rf"\b(\d{{1,2}})\s*({month_names})\s*(\d{{2,4}})"
-                rf"(?:\s*,?\s*(\d{{1,2}})(?::(\d{{2}}))?(?:\s*([AP]M|A\.?M\.?|P\.?M\.?))?)?\b",
-                s,
-                flags=re.IGNORECASE,
-            )
-            if m:
-                day = int(m.group(1))
-                mon = _MONTHS.get(m.group(2).lower()[:3]) or _MONTHS.get(m.group(2).lower())
-                year = int(m.group(3))
-                if year < 100:
-                    year = 2000 + year
-                hour = m.group(4)
-                minute = m.group(5)
-                ampm_raw = m.group(6)
-                if mon:
-                    if hour:
-                        hh = int(hour)
-                        mm = int(minute) if minute else 0
-                        # If AM/PM provided, emit 12-hour format expected by downstream parser.
-                        if ampm_raw and re.search(r"p", ampm_raw, flags=re.IGNORECASE):
-                            ampm = "PM"
-                            return f"{day:02d}/{mon:02d}/{year} {hh:02d}:{mm:02d} {ampm}"
-                        if ampm_raw and re.search(r"a", ampm_raw, flags=re.IGNORECASE):
-                            ampm = "AM"
-                            return f"{day:02d}/{mon:02d}/{year} {hh:02d}:{mm:02d} {ampm}"
-                        # No AM/PM => emit 24-hour.
-                        return f"{day:02d}/{mon:02d}/{year} {hh:02d}:{mm:02d}"
-                    return f"{day:02d}/{mon:02d}/{year}"
-
-            # 2) Numeric date (optionally time)
-            m = re.search(
-                r"\b(\d{1,2})[\-/\.](\d{1,2})[\-/\.](\d{2,4})"
-                r"(?:\s*,?\s*(\d{1,2})(?::(\d{2}))?(?:\s*([AP]M))?)?\b",
-                s,
-                flags=re.IGNORECASE,
-            )
-            if m:
-                day = int(m.group(1))
-                mon = int(m.group(2))
-                year = int(m.group(3))
-                if year < 100:
-                    year = 2000 + year
-                hour = m.group(4)
-                minute = m.group(5)
-                ampm = (m.group(6) or "").upper()
-                if hour:
-                    hh = int(hour)
-                    mm = int(minute) if minute else 0
-                    if ampm in ["AM", "PM"]:
-                        return f"{day:02d}/{mon:02d}/{year} {hh:02d}:{mm:02d} {ampm}"
-                    return f"{day:02d}/{mon:02d}/{year} {hh:02d}:{mm:02d}"
-                return f"{day:02d}/{mon:02d}/{year}"
-
-            # Fallback: return as-is; downstream may still parse.
-            return s
-
-        def _extract_after_label(text: str, label: str) -> Optional[str]:
-            # Match "Label: value" or "Label - value"; also handle value on next line.
-            if not text:
-                return None
-            pat = rf"(?im)^\s*{re.escape(label)}\s*[:\-\u2013\u2014]\s*(.*)$"
-            m = re.search(pat, text)
-            if not m:
-                return None
-            v = (m.group(1) or "").strip()
-            if v:
-                return v
-            # If label line has no inline value, take next non-empty line.
-            start = m.end()
-            tail = text[start:]
-            for ln in tail.splitlines():
-                ln = ln.strip()
-                if ln:
-                    # Stop if we hit another label-looking line.
-                    if re.match(r"^[A-Za-z][A-Za-z /_-]{2,40}\s*[:\-\u2013\u2014]", ln):
-                        break
-                    return ln
-            return None
-
-        def _extract_first_matching_line_value(text: str, labels: List[str]) -> Optional[str]:
-            for lab in labels:
-                v = _extract_after_label(text, lab)
-                if v:
-                    return v
-            return None
-
-        def _extract_deadline_anywhere(text: str) -> Optional[str]:
-            if not text:
-                return None
-            labels = [
-                "Submission Deadline",
-                "Bid Submission Deadline",
-                "Deadline",
-                "Due Date",
-                "Last date of submission",
-                "Last Date of Submission",
-                "Last date of Submission",
-            ]
-            v = _extract_first_matching_line_value(text, labels)
-            if v:
-                return v
-
-            # Search within same line as common phrases.
-            month_names = r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t)?(?:ember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
-            # e.g. "Last date of submission is 20 Feb 2026, 5 PM IST"
-            m = re.search(
-                rf"(?im)(submission\s+deadline|bid\s+submission\s+deadline|deadline|due\s+date|last\s+date\s+of\s+submission)[^\n]{{0,80}}?"
-                rf"(\d{{1,2}}\s*{month_names}\s*\d{{2,4}}(?:\s*,?\s*\d{{1,2}}(?::\d{{2}})?\s*(?:A\.?M\.?|P\.?M\.?|AM|PM)?)?)",
-                text,
-                flags=re.IGNORECASE,
-            )
-            if m:
-                return m.group(2).strip()
-
-            # Numeric date fallback near keywords.
-            m = re.search(
-                r"(?im)(submission\s+deadline|bid\s+submission\s+deadline|deadline|due\s+date|last\s+date\s+of\s+submission)[^\n]{0,80}?"
-                r"(\d{1,2}[\-/\.]\d{1,2}[\-/\.]\d{2,4}(?:\s+\d{1,2}:\d{2}(?:\s*[AP]M)?)?)",
-                text,
-            )
-            if m:
-                return m.group(2).strip()
-
-            return None
-
-        def _extract_estimated_value_anywhere(text: str) -> Optional[str]:
-            if not text:
-                return None
-            labels = [
-                "Estimated Value",
-                "Estimated Project Value",
-                "Project Value",
-                "Tender Value",
-                "Estimated Cost",
-            ]
-            v = _extract_first_matching_line_value(text, labels)
-            if v:
-                return v
-
-            # Currency range patterns.
-            # Examples:
-            # - INR 2.5 – 3.2 Crore
-            # - ₹2.5 Cr
-            # - Rs. 250 Lakh
-            cur = r"(?:₹|INR|Rs\.?|Rupees)"
-            num = r"\d{1,3}(?:[\d,]*\d)?(?:\.\d+)?"
-            rng = rf"{num}(?:\s*(?:-|\u2013|to)\s*{num})?"
-            unit = r"(?:crore|crores|cr\b|lakh|lakhs|lac|lacs)"
-            m = re.search(rf"(?im)\b{cur}\s*{rng}\s*(?:{unit})\b", text)
-            if m:
-                return m.group(0).strip()
-
-            # Sometimes unit precedes currency wording; try without currency.
-            m = re.search(rf"(?im)\b{rng}\s*(?:{unit})\b", text)
-            if m:
-                return m.group(0).strip()
-
-            return None
-
-        def _value_exceeds_2cr(estimated_value: str) -> bool:
-            if not estimated_value:
-                return False
-            s = str(estimated_value).lower()
-            s = s.replace("\u2013", "-").replace("\u2014", "-")
-            nums = [float(x.replace(",", "")) for x in re.findall(r"\d+(?:\.\d+)?", s)]
-            if not nums:
-                return False
-            hi = max(nums)
-            # If value is in crores/cr.
-            if re.search(r"\b(crore|crores|cr)\b", s):
-                return hi >= 2.0
-            # If value is in lakhs (200 lakhs == 2 cr).
-            if re.search(r"\b(lakh|lakhs|lac|lacs)\b", s):
-                return hi >= 200.0
-            return False
-
-        def _compute_gmail_priority(deadline_str: Optional[str], estimated_value: Optional[str]) -> str:
-            # Rule:
-            # - Deadline in past => Expired
-            # - Deadline <= 10 days => Critical
-            # - Deadline <= 21 days => High
-            # - Else Medium
-            days_remaining = None
-            try:
-                # Use existing parser if available; our normalization emits numeric formats.
-                dt = getattr(rfp_module, "_parse_deadline", None)
-                if callable(dt):
-                    parsed = dt(deadline_str)
-                else:
-                    parsed = None
-                if parsed:
-                    delta = parsed - datetime.now()
-                    days_remaining = int(delta.total_seconds() // 86400)
-            except Exception:
-                days_remaining = None
-
-            value_high = _value_exceeds_2cr(estimated_value or "")
-            if isinstance(days_remaining, int):
-                if days_remaining < 0:
-                    return "Expired"
-                if days_remaining <= 10:
-                    return "Critical"
-                if days_remaining <= 21:
-                    return "High"
-                return "Medium"
-            return "High" if value_high else "Medium"
-
-        def _extract_rfp_id(text: str) -> Optional[str]:
-            for lab in ["Bid Reference No.", "Bid Reference No", "Bid Reference", "RFP Reference", "Tender Ref", "Tender Reference"]:
-                v = _extract_after_label(text, lab)
-                if v:
-                    # trim trailing punctuation
-                    return v.strip().strip(". ")
-            return None
-
-        def _extract_scope_items_count(text: str) -> Optional[int]:
-            # Count bullets under "Scope Summary:" section
-            m = re.search(r"(?is)scope\s*summary\s*:\s*(.+)$", text)
-            if not m:
-                return None
-            tail = m.group(1)
-            lines = [ln.strip() for ln in tail.splitlines()]
-            count = 0
-            for ln in lines:
-                if not ln:
-                    # stop once we hit a blank after bullets have started
-                    if count > 0:
-                        break
-                    continue
-                if re.match(r"^[-*•]\s+", ln):
-                    count += 1
-                    continue
-                # stop when we reach another field label
-                if re.match(r"^(submission\s+deadline|estimated\s+value|buyer\s*/\s*organization|buyer|organization)\s*:", ln, flags=re.IGNORECASE):
-                    break
-            return count if count > 0 else None
-
-        def _infer_domain(text: str) -> str:
-            t = (text or "").lower()
-
-            # Default to Electrical if power/control cable family is mentioned.
-            if any(k in t for k in [
-                "power cable",
-                "control cable",
-                "xlpe",
-                "ht ",
-                " ht",
-                "lt ",
-                " lt",
-                "11kv",
-                "33kv",
-                "66kv",
-                "132kv",
-                "cable",
-                "armoured",
-                "unarmoured",
-            ]):
-                return "Electrical"
-
-            if any(k in t for k in [" epc ", "\nepc\n", "engineering procurement", "procurement construction", "turnkey", "lump sum"]):
-                return "EPC"
-
-            if any(k in t for k in ["paint", "painting", "coating", "epoxy", "polyurethane", "powder coating"]):
-                return "Paints"
-
-            if "electrical" in t:
-                return "Electrical"
-            return "General"
-
-        def _extract_title(subject: str, body_text: str) -> str:
-            s = (subject or "").strip()
-            if s:
-                return s
-            # fallback: first non-empty paragraph
-            for para in (body_text or "").split("\n\n"):
-                p = para.strip()
-                if p:
-                    # cap length
-                    return p[:140]
-            return "Untitled RFP"
-
-        def _gmail_email_to_rfp(email_obj: Dict[str, Any], index: int) -> Optional[Dict[str, Any]]:
-            try:
+        if gmail_emails:
+            print(f"[Gmail Integration] Processing {len(gmail_emails)} Gmail emails through AI module")
+            for email_obj in gmail_emails:
                 message_id = str(email_obj.get("message_id") or "").strip()
-                sender = str(email_obj.get("sender") or "").strip()
                 subject = str(email_obj.get("subject") or "").strip()
                 body_text = str(email_obj.get("body_text") or "").strip()
-                received_ts = str(email_obj.get("received_timestamp") or "").strip()
-
-                if not message_id or (not subject and not body_text):
-                    return None
-
-                rfp_id = _extract_rfp_id(body_text) or _stable_id_fallback(message_id, subject, body_text)
-                rfp_title = _extract_title(subject, body_text)
-                buyer = _extract_after_label(body_text, "Buyer / Organization") or _extract_after_label(body_text, "Buyer") or ""
-                submission_deadline_raw = _extract_deadline_anywhere(body_text)
-                submission_deadline = _normalize_deadline_for_priority(submission_deadline_raw) or (submission_deadline_raw or "")
-                estimated_value_raw = _extract_estimated_value_anywhere(body_text)
-                estimated_value = (estimated_value_raw or "").strip()
-                if estimated_value:
-                    estimated_value = re.sub(r"\s+", " ", estimated_value.replace("\u2013", "-").replace("\u2014", "-"))
-                scope_items = _extract_scope_items_count(body_text)
-                domain = _infer_domain(subject + "\n" + body_text)
-
-                # Gmail-specific priority override (rule-based; no LLM)
-                gmail_priority = _compute_gmail_priority(submission_deadline, estimated_value)
-
-                raw = {
-                    "rfp_id": rfp_id,
-                    "rfp_title": rfp_title,
-                    "buyer": buyer,
-                    "submission_deadline": submission_deadline,
-                    "estimated_project_value": estimated_value,
-                    "scope_items": scope_items or 0,
-                    "tender_source": sender,
-                    "domain": domain,
-                    "source": "gmail",
-                    "gmail_message_id": message_id,
-                    "gmail_received_timestamp": received_ts,
+                
+                if not subject and not body_text:
+                    continue
+                
+                # Combine email content for AI processing
+                combined_text = f"Subject: {subject}\n\n{body_text}"
+                
+                # Create state for this Gmail RFP (AI module handles extraction, matching, domain detection)
+                gmail_state = {
+                    "gmail_rfp_text": combined_text,
+                    "gmail_message_id": message_id
                 }
+                
+                # Process through AI module (uses LLM + Ground Truth logic)
+                try:
+                    gmail_state = rfp_module.sales_agent_node(gmail_state)
+                    gmail_rfps = gmail_state.get("sales_output", [])
+                    
+                    # Debug: Check what we got
+                    print(f"[Gmail Integration] 🔍 Debug: gmail_rfps count={len(gmail_rfps)}")
+                    
+                    # Add Gmail-specific metadata
+                    for rfp in gmail_rfps:
+                        rfp["source"] = "gmail"
+                        rfp["gmail_message_id"] = message_id
+                        rfp["gmail_received_timestamp"] = email_obj.get("received_timestamp", "")
+                        
+                        # Extract items from the RFP object (not from state root)
+                        rfp_id = rfp.get("rfp_id")
+                        extracted_items = rfp.get("extracted_item_list", [])
+                        
+                        print(f"[Gmail Integration] 🔍 Debug: RFP ID={rfp_id}, extracted_items count={len(extracted_items)}")
+                        
+                        # Store extracted items and text cache for this RFP
+                        if rfp_id:
+                            if extracted_items:
+                                gmail_extracted_items_map[rfp_id] = extracted_items
+                                gmail_text_cache[rfp_id] = combined_text
+                                print(f"[Gmail Integration] 📦 Stored {len(extracted_items)} items for {rfp_id}")
+                            else:
+                                print(f"[Gmail Integration] ⚠️ No extracted_items for {rfp_id} (empty list)")
+                        else:
+                            print(f"[Gmail Integration] ⚠️ RFP has no rfp_id!")
+                    
+                    gmail_sales_data.extend(gmail_rfps)
+                    print(f"[Gmail Integration] ✅ Processed: {subject[:60]}")
+                    
+                except Exception as e:
+                    print(f"[Gmail Integration] ⚠️ Error processing {message_id}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
 
-                # Use the *existing* priority logic via the existing formatter
-                formatted = rfp_module.format_sales_for_frontend(raw, index)
-                formatted["source"] = "gmail"
-                formatted["gmail_message_id"] = message_id
-                formatted["gmail_received_timestamp"] = received_ts
-
-                # Ensure UI shows Gmail-specific priority per requirements.
-                formatted["priority"] = gmail_priority
-                return formatted
-            except Exception as e:
-                print(f"[Gmail Parse] ⚠️ Skipping email due to parse error: {e}")
-                return None
-
-        gmail_emails = list_gmail_emails()
-        gmail_rfps: List[Dict[str, Any]] = []
-        gmail_pdf_paths: List[str] = []
-        pdf_text_cache = state.get("pdf_text_cache", {}) or {}
-
-        for idx, email_obj in enumerate(gmail_emails):
-            rfp = _gmail_email_to_rfp(email_obj, 1000 + idx)
-            if not rfp:
-                continue
-
-            # Create a stable, existing "pdf" placeholder so downstream agents
-            # (Master/Technical) can operate without modifications.
-            message_id = str(email_obj.get("message_id") or "").strip()
-            subject = str(email_obj.get("subject") or "")
-            body_text = str(email_obj.get("body_text") or "")
-            digest = hashlib.md5((message_id + "|" + subject).encode("utf-8", errors="ignore")).hexdigest()[:12]
-            dummy_pdf = f"gmail_{digest}.pdf"
-            try:
-                # Ensure file exists (content unused because we rely on cache)
-                with open(dummy_pdf, "ab"):
-                    pass
-            except Exception as e:
-                print(f"[Gmail Integration] ⚠️ Could not create placeholder PDF {dummy_pdf}: {e}")
-                continue
-
-            pdf_text_cache[dummy_pdf] = body_text
-            gmail_rfps.append(rfp)
-            gmail_pdf_paths.append(dummy_pdf)
-
-        if gmail_rfps:
-            sales_data = list(sales_data) + gmail_rfps
+        # Merge Gmail and website RFPs
+        if gmail_sales_data:
+            print(f"[Gmail Integration] Merged {len(gmail_sales_data)} Gmail RFPs with {len(sales_data)} website RFPs")
+            sales_data = list(sales_data) + gmail_sales_data
             state["sales_output"] = sales_data
-            state["pdf_paths"] = list(state.get("pdf_paths", []) or []) + gmail_pdf_paths
-            state["pdf_text_cache"] = pdf_text_cache
+            
+            # Store Gmail-specific data in state for later retrieval
+            state["gmail_extracted_items_map"] = gmail_extracted_items_map
+            state["gmail_text_cache"] = gmail_text_cache
 
         save_sales_output(sales_data)
         
         # Priority Selector (internal - doesn't affect saved sales output)
         state = rfp_module.select_highest_priority_rfp(state)
         
+        # Restore Gmail-specific data for the selected RFP
+        # After select_highest_priority_rfp, state["sales_output"] contains only the selected RFP
+        selected_rfps = state.get("sales_output", [])
+        selected_rfp_id = selected_rfps[0].get("rfp_id") if selected_rfps else None
+        
+        print(f"[Gmail Integration] 🔍 Debug: Selected RFP ID={selected_rfp_id}")
+        print(f"[Gmail Integration] 🔍 Debug: gmail_extracted_items_map keys={list(state.get('gmail_extracted_items_map', {}).keys())}")
+        
+        if selected_rfp_id:
+            gmail_extracted_items_map = state.get("gmail_extracted_items_map", {})
+            gmail_text_cache = state.get("gmail_text_cache", {})
+            
+            # If selected RFP is a Gmail RFP, restore its extracted items
+            if selected_rfp_id in gmail_extracted_items_map:
+                state["extracted_item_list"] = gmail_extracted_items_map[selected_rfp_id]
+                state["gmail_rfp_text"] = gmail_text_cache.get(selected_rfp_id, "")
+                print(f"[Gmail Integration] 🔄 Restored {len(state['extracted_item_list'])} items for selected RFP {selected_rfp_id}")
+            else:
+                print(f"[Gmail Integration] ⚠️ Selected RFP {selected_rfp_id} not found in gmail_extracted_items_map")
+        
         # Master Agent
         state = rfp_module.master_agent_node(state)
         save_master_output(state.get("master_output", {}))
+        
+        # Debug: Check state before Technical Agent
+        print(f"[Pre-Technical] 🔍 Debug: extracted_item_list count={len(state.get('extracted_item_list', []))}")
+        print(f"[Pre-Technical] 🔍 Debug: gmail_rfp_text present={bool(state.get('gmail_rfp_text'))}")
+        print(f"[Pre-Technical] 🔍 Debug: pdf_path={state.get('pdf_path')}")
         
         # Technical Agent
         state = rfp_module.technical_agent_node(state)
         # Get both formatted and raw outputs
         tech_formatted = state.get("technical_output", {})
         tech_raw = state.get("technical_output_raw", {})
+        
+        # Ensure technical_output_raw exists in state (required by proposal_builder)
+        if not tech_raw and tech_formatted:
+            # Fallback: use formatted as raw if raw doesn't exist
+            state["technical_output_raw"] = tech_formatted
+            tech_raw = tech_formatted
+            print("[Technical Agent] ⚠️ Using formatted output as fallback for raw output")
         
         # Build comparison matrices for each item
         if tech_raw.get("items") and tech_formatted.get("items"):
@@ -617,6 +337,7 @@ class GmailRfpEvent(BaseModel):
     sender: str
     subject: str
     body_text: Optional[str] = ""
+    snippet: Optional[str] = ""
     received_timestamp: Optional[str] = None
 
     # Backward-compatible fields from older listener payloads
@@ -625,9 +346,19 @@ class GmailRfpEvent(BaseModel):
 
 @app.post("/integrations/gmail/rfp-event")
 def ingest_gmail_rfp_event(event: GmailRfpEvent):
+    from datetime import datetime, timezone
     # Store raw email (deduped) + create a notification. Do NOT trigger agents.
-    received_ts = event.received_timestamp or event.timestamp or datetime.utcnow().isoformat() + "Z"
+    if not event.received_timestamp and not event.timestamp:
+        # If no timestamp provided, use current UTC time
+        received_ts = datetime.now(timezone.utc).isoformat()
+    else:
+        received_ts = event.received_timestamp or event.timestamp
+    
     body_text = event.body_text or ""
+    snippet = event.snippet or ""
+    
+    print(f"[Gmail Ingest] Received email: '{event.subject}' from {event.sender}")
+    print(f"[Gmail Ingest] Timestamp: {received_ts}")
 
     message_id = (event.message_id or "").strip()
     if not message_id:
@@ -639,17 +370,21 @@ def ingest_gmail_rfp_event(event: GmailRfpEvent):
         "sender": event.sender,
         "subject": event.subject,
         "body_text": body_text,
+        "snippet": snippet,
         "received_timestamp": received_ts,
     }
 
     inserted = add_gmail_email(raw_email)
+    print(f"[Gmail Ingest] Stored in backend: {inserted} (False if duplicate)")
     if inserted:
-        # Minimal notification schema for UI
+        # Minimal notification schema for UI - store full body for View More
         notif = {
             "id": str(uuid.uuid4()),
             "type": "discovery",
-            "title": f"New Gmail RFP: {event.subject}" if event.subject else "New Gmail RFP received",
+            "title": event.subject if event.subject else "No Subject",
             "description": f"From: {event.sender}",
+            "body": body_text,
+            "snippet": snippet,
             "received_timestamp": received_ts,
             "read": False,
             "source": "gmail",
@@ -667,6 +402,18 @@ def get_notifications():
         return str(n.get("received_timestamp") or "")
     notifs.sort(key=_ts, reverse=True)
     return notifs
+
+@app.delete("/notifications")
+def clear_all_notifications():
+    """Clear all notifications"""
+    clear_notifications()
+    return {"status": "cleared"}
+
+@app.delete("/gmail-data")
+def reset_gmail_data():
+    """Clear all Gmail emails, processed IDs, and notifications (useful for testing)"""
+    clear_gmail_data()
+    return {"status": "cleared", "message": "All Gmail data and notifications cleared"}
 
 # GET /run/status/{task_id}
 @app.get("/run/status/{task_id}")
@@ -725,3 +472,218 @@ def get_compliance():
 @app.get("/proposal")
 def get_proposal():
     return {"proposal": get_proposal_output()}
+
+@app.post("/proposal/edit")
+def edit_proposal(request: ProposalEditRequest):
+    """Update the proposal with edited content"""
+    try:
+        save_proposal_output(request.updated_bid)
+        return {
+            "status": "success",
+            "message": "Proposal updated successfully",
+            "updated_content": request.updated_bid
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Failed to update proposal: {str(e)}"
+        }
+
+@app.post("/proposal/generate-cover-letter")
+def generate_cover_letter(request: CoverLetterRequest):
+    """Generate AI-powered cover letter using Groq API"""
+    try:
+        import requests
+        
+        GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+        GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+        
+        if not GROQ_API_KEY:
+            return {
+                "status": "error",
+                "message": "GROQ_API_KEY not configured in .env file"
+            }
+        
+        # Get the actual generated bid proposal text
+        bid_proposal = get_proposal_output()
+        
+        if not bid_proposal or len(bid_proposal.strip()) < 50:
+            return {
+                "status": "error",
+                "message": "No proposal found. Please generate the proposal first by running the Technical and Pricing agents."
+            }
+        
+        # Construct a professional prompt using the actual proposal content
+        prompt = f"""You are a professional bid writer. Below is a complete tender proposal that has been generated for a client.
+
+PROPOSAL CONTENT:
+{bid_proposal}
+
+Based ONLY on the above proposal content, create a professional 3-paragraph cover letter that:
+1. First paragraph: Express gratitude for the opportunity and reference the specific RFP title and buyer mentioned in the proposal
+2. Second paragraph: Highlight expertise in the specific domain/materials mentioned in the proposal (e.g., if proposal is about paints, mention painting expertise; if about cables, mention cable expertise), emphasizing technical capability and compliance
+3. Third paragraph: Convey confidence in meeting requirements, timeline commitment, and eagerness for partnership
+
+IMPORTANT: Extract the buyer name, RFP title, and domain/materials from the proposal above. Use those exact details in the cover letter.
+
+Tone: Professional, confident, client-focused
+Length: 150-200 words total
+Format: Plain text, no special formatting or markdown
+Do NOT use placeholder company names - write as "We" or "Our organization"."""
+        
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": "llama-3.3-70b-versatile",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a professional bid writer with expertise in government and enterprise tender responses. Always read the proposal carefully and create a cover letter that matches its content."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "temperature": 0.7,
+            "max_tokens": 500
+        }
+        
+        response = requests.post(GROQ_API_URL, json=payload, headers=headers, timeout=30)
+        
+        if response.status_code == 200:
+            result = response.json()
+            cover_letter = result["choices"][0]["message"]["content"].strip()
+            
+            # Try to extract buyer and title from proposal for response
+            buyer = "Valued Client"
+            rfp_title = "the tender"
+            try:
+                lines = bid_proposal.split('\n')
+                for line in lines[:10]:  # Check first 10 lines
+                    if "We thank" in line and "for inviting bids" in line:
+                        parts = line.split("We thank ")[1].split(" for inviting")
+                        buyer = parts[0].strip()
+                    if "Subject:" in line or "Proposal for" in line:
+                        if "RFP" in line:
+                            title_part = line.split("Proposal for ")[1].split(" (RFP")[0] if "Proposal for" in line else ""
+                            if title_part:
+                                rfp_title = title_part.strip()
+            except:
+                pass
+            
+            return {
+                "status": "success",
+                "cover_letter": cover_letter,
+                "buyer": buyer,
+                "rfp_title": rfp_title
+            }
+        else:
+            error_msg = response.text
+            print(f"[Groq API Error] Status {response.status_code}: {error_msg}")
+            return {
+                "status": "error",
+                "message": f"Groq API error: {error_msg}"
+            }
+            
+    except Exception as e:
+        print(f"[Cover Letter Generation Error] {str(e)}")
+        return {
+            "status": "error",
+            "message": f"Failed to generate cover letter: {str(e)}"
+        }
+
+@app.post("/proposal/send-email")
+async def send_email(
+    to_email: str = Form(...),
+    subject: str = Form(...),
+    html_content: str = Form(...),
+    attachments: List[UploadFile] = File(default=[])
+):
+    """Send proposal email via Gmail SMTP with attachments"""
+    try:
+        # Gmail SMTP Configuration
+        SENDER_EMAIL = os.getenv("GMAIL_SENDER_EMAIL", "sohamghorpade912@gmail.com")
+        SENDER_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")  # Gmail App Password
+        SMTP_HOST = "smtp.gmail.com"
+        SMTP_PORT = 587
+        
+        if not SENDER_PASSWORD:
+            return {
+                "status": "error",
+                "message": "GMAIL_APP_PASSWORD not configured in .env file"
+            }
+        
+        print(f"[Gmail SMTP] Sender: {SENDER_EMAIL}")
+        print(f"[Gmail SMTP] Recipient: {to_email}")
+        print(f"[Gmail SMTP] Subject: {subject}")
+        
+        # Create email message
+        msg = EmailMessage()
+        msg['From'] = formataddr(("RFP Bidding System", SENDER_EMAIL))
+        msg['To'] = to_email
+        msg['Subject'] = subject
+        
+        # Set HTML content
+        msg.set_content(html_content, subtype='html')
+        
+        # Process attachments
+        for file in attachments:
+            if file.filename:
+                # Read file content
+                file_content = await file.read()
+                
+                # Guess the MIME type
+                mime_type, _ = mimetypes.guess_type(file.filename)
+                if mime_type is None:
+                    mime_type = 'application/octet-stream'
+                
+                # Split MIME type into maintype and subtype
+                maintype, subtype = mime_type.split('/', 1)
+                
+                # Add attachment
+                msg.add_attachment(
+                    file_content,
+                    maintype=maintype,
+                    subtype=subtype,
+                    filename=file.filename
+                )
+                print(f"[Gmail SMTP] Attached: {file.filename} ({mime_type})")
+        
+        # Connect to Gmail SMTP server and send
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()  # Secure the connection
+            server.login(SENDER_EMAIL, SENDER_PASSWORD)
+            server.send_message(msg)
+        
+        print(f"[Gmail SMTP] ✅ Email sent successfully to {to_email}")
+        
+        return {
+            "status": "success",
+            "message": f"Email successfully sent via Gmail SMTP to {to_email}"
+        }
+        
+    except smtplib.SMTPAuthenticationError as e:
+        error_msg = str(e)
+        print(f"[Gmail SMTP Error] Authentication failed: {error_msg}")
+        return {
+            "status": "error",
+            "message": "Gmail authentication failed. Please verify the sender email and app password are correct."
+        }
+    except smtplib.SMTPException as e:
+        error_msg = str(e)
+        print(f"[Gmail SMTP Error] SMTP error: {error_msg}")
+        return {
+            "status": "error",
+            "message": f"SMTP error: {error_msg}"
+        }
+    except Exception as e:
+        error_msg = str(e)
+        print(f"[Email Send Error] {error_msg}")
+        return {
+            "status": "error",
+            "message": f"Failed to send email: {error_msg}"
+        }
