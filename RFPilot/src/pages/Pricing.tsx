@@ -33,6 +33,10 @@ import {
   Sparkles,
   Loader2,
   Info,
+  Target,
+  AlertCircle,
+  XCircle,
+  SkipForward,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -44,6 +48,8 @@ export default function Pricing() {
   const [loading, setLoading] = useState(true);
   const [showRationale, setShowRationale] = useState(false);
   const [selectedItemRationale, setSelectedItemRationale] = useState<string>("");
+  const [showViabilityDialog, setShowViabilityDialog] = useState(false);
+  const [isSkipping, setIsSkipping] = useState(false);
 
   useEffect(() => {
     fetch(`${API}/pricing/output`)
@@ -132,6 +138,80 @@ export default function Pricing() {
   const showItemRationale = (rationale: string) => {
     setSelectedItemRationale(rationale);
     setShowRationale(true);
+  };
+
+  // Calculate Overall Spec Match % (average of all items)
+  const overallSpecMatch = items.length > 0
+    ? items.reduce((sum, item) => sum + (item.spec_match_percent || 0), 0) / items.length
+    : 0;
+
+  const handleSkipRFP = async () => {
+    setIsSkipping(true);
+    try {
+      const response = await fetch(`${API}/pipeline/skip`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const result = await response.json();
+
+      if (result.status === "success") {
+        alert(`RFP skipped successfully. Processing next best RFP...`);
+        
+        // Poll for the new task to complete
+        const taskId = result.task_id;
+        const pollInterval = setInterval(async () => {
+          const statusRes = await fetch(`${API}/run/status/${taskId}`);
+          const statusData = await statusRes.json();
+          
+          if (statusData.status === "completed") {
+            clearInterval(pollInterval);
+            // Check if there are any RFPs left
+            const masterRes = await fetch(`${API}/master/output`);
+            const masterData = await masterRes.json();
+            
+            if (masterData.error && masterData.error.includes("No RFPs available")) {
+              setIsSkipping(false);
+              alert("All available RFPs have been skipped. Please run the Sales Agent again to discover new opportunities.");
+              window.location.href = "/dashboard";
+            } else {
+              // Reload the page to show the new RFP
+              window.location.reload();
+            }
+          } else if (statusData.status === "failed") {
+            clearInterval(pollInterval);
+            // Check if it failed due to no RFPs
+            const masterRes = await fetch(`${API}/master/output`);
+            const masterData = await masterRes.json();
+            
+            if (masterData.error && masterData.error.includes("No RFPs available")) {
+              setIsSkipping(false);
+              alert("All available RFPs have been skipped. Please run the Sales Agent again to discover new opportunities.");
+              window.location.href = "/dashboard";
+            } else {
+              setIsSkipping(false);
+              alert("Failed to process next RFP. Please check the pipeline status.");
+            }
+          }
+        }, 2000);
+        
+        // Timeout after 2 minutes
+        setTimeout(() => {
+          clearInterval(pollInterval);
+          if (isSkipping) {
+            setIsSkipping(false);
+            alert("Pipeline is taking longer than expected. Please check the dashboard.");
+          }
+        }, 120000);
+      } else {
+        setIsSkipping(false);
+        alert(`Failed to skip RFP: ${result.message}`);
+      }
+    } catch (error) {
+      setIsSkipping(false);
+      console.error("Error skipping RFP:", error);
+      alert("Failed to skip RFP. Please try again.");
+    }
   };
 
   return (
@@ -362,6 +442,14 @@ export default function Pricing() {
               <Calculator className="h-4 w-4 mr-2" />
               Recalculate
             </Button>
+            <Button 
+              variant="outline"
+              onClick={() => setShowViabilityDialog(true)}
+              className="bg-gradient-to-r from-blue-600/10 to-purple-600/10 hover:from-blue-600/20 hover:to-purple-600/20 border-blue-500/50"
+            >
+              <Target className="h-4 w-4 mr-2" />
+              Evaluate Viability
+            </Button>
             <Button>
               <CheckCircle2 className="h-4 w-4 mr-2" />
               Finalize Pricing & Proceed
@@ -459,6 +547,176 @@ export default function Pricing() {
               </div>
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Technical Viability Gate Dialog */}
+      <Dialog open={showViabilityDialog} onOpenChange={setShowViabilityDialog}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Target className="h-5 w-5 text-primary" />
+              Technical Viability Assessment
+            </DialogTitle>
+          </DialogHeader>
+          
+          <div className="space-y-6">
+            {/* Overall Spec Match Display */}
+            <div className="text-center p-6 rounded-lg border-2" style={{
+              backgroundColor: overallSpecMatch > 70 ? 'rgba(34, 197, 94, 0.1)' : 
+                             overallSpecMatch >= 50 ? 'rgba(234, 179, 8, 0.1)' : 
+                             'rgba(239, 68, 68, 0.1)',
+              borderColor: overallSpecMatch > 70 ? 'rgb(34, 197, 94)' : 
+                          overallSpecMatch >= 50 ? 'rgb(234, 179, 8)' : 
+                          'rgb(239, 68, 68)'
+            }}>
+              <div className="flex items-center justify-center gap-2 mb-2">
+                {overallSpecMatch > 70 ? (
+                  <CheckCircle2 className="h-8 w-8 text-green-600" />
+                ) : overallSpecMatch >= 50 ? (
+                  <AlertCircle className="h-8 w-8 text-yellow-600" />
+                ) : (
+                  <XCircle className="h-8 w-8 text-red-600" />
+                )}
+              </div>
+              <h3 className="text-2xl font-bold mb-1" style={{
+                color: overallSpecMatch > 70 ? 'rgb(34, 197, 94)' : 
+                       overallSpecMatch >= 50 ? 'rgb(234, 179, 8)' : 
+                       'rgb(239, 68, 68)'
+              }}>
+                Overall Spec Match: {overallSpecMatch.toFixed(1)}%
+              </h3>
+              <p className="text-sm text-muted-foreground">
+                Average match score across all {items.length} item(s)
+              </p>
+            </div>
+
+            {/* Conditional UI based on score */}
+            {overallSpecMatch > 70 && (
+              <div className="space-y-4">
+                <div className="p-4 rounded-lg bg-green-600/10 border border-green-600/30">
+                  <p className="text-green-700 dark:text-green-400 font-semibold mb-2">
+                    ✅ High Viability Detected
+                  </p>
+                  <p className="text-sm text-muted-foreground">
+                    Suggestion: The technical specifications match our capabilities very well. 
+                    This RFP has a high probability of success. Consider proceeding to the Final Proposal stage.
+                  </p>
+                </div>
+                <div className="flex gap-3">
+                  <Button 
+                    className="flex-1 bg-green-600 hover:bg-green-700"
+                    onClick={() => setShowViabilityDialog(false)}
+                  >
+                    <CheckCircle2 className="h-4 w-4 mr-2" />
+                    Continue to Proposal
+                  </Button>
+                  <Button 
+                    variant="outline"
+                    className="flex-1"
+                    onClick={() => {
+                      setShowViabilityDialog(false);
+                      handleSkipRFP();
+                    }}
+                    disabled={isSkipping}
+                  >
+                    {isSkipping ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <SkipForward className="h-4 w-4 mr-2" />}
+                    Manual Skip
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {overallSpecMatch >= 50 && overallSpecMatch <= 70 && (
+              <div className="space-y-4">
+                <div className="p-4 rounded-lg bg-yellow-600/10 border border-yellow-600/30">
+                  <p className="text-yellow-700 dark:text-yellow-400 font-semibold mb-2">
+                    ⚠️ Medium Viability
+                  </p>
+                  <p className="text-sm text-muted-foreground">
+                    Suggestion: The technical match is moderate. Consider saving this RFP to the Repository 
+                    for further review, or skip it to find a better opportunity.
+                  </p>
+                </div>
+                <div className="flex gap-3">
+                  <Button 
+                    variant="outline"
+                    className="flex-1"
+                    disabled
+                    title="Coming Soon"
+                  >
+                    <FileText className="h-4 w-4 mr-2" />
+                    Save & Cycle (Coming Soon)
+                  </Button>
+                  <Button 
+                    variant="destructive"
+                    className="flex-1"
+                    onClick={() => {
+                      setShowViabilityDialog(false);
+                      handleSkipRFP();
+                    }}
+                    disabled={isSkipping}
+                  >
+                    {isSkipping ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <SkipForward className="h-4 w-4 mr-2" />}
+                    Cycle Without Saving
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {overallSpecMatch < 50 && (
+              <div className="space-y-4">
+                <div className="p-4 rounded-lg bg-red-600/10 border border-red-600/30">
+                  <p className="text-red-700 dark:text-red-400 font-semibold mb-2">
+                    ❌ Low Viability
+                  </p>
+                  <p className="text-sm text-muted-foreground">
+                    Suggestion: The technical specifications do not match our capabilities well. 
+                    It is recommended to discard this RFP and find a better opportunity to maximize your win rate.
+                  </p>
+                </div>
+                <Button 
+                  variant="destructive"
+                  className="w-full bg-red-600 hover:bg-red-700"
+                  onClick={() => {
+                    setShowViabilityDialog(false);
+                    handleSkipRFP();
+                  }}
+                  disabled={isSkipping}
+                >
+                  {isSkipping ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <XCircle className="h-4 w-4 mr-2" />}
+                  Discard & Cycle
+                </Button>
+              </div>
+            )}
+
+            {/* Item-level breakdown */}
+            <div className="border-t pt-4">
+              <p className="text-xs font-semibold text-muted-foreground uppercase mb-3">
+                Item-Level Breakdown
+              </p>
+              <div className="space-y-2 max-h-40 overflow-y-auto">
+                {items.map((item, idx) => (
+                  <div key={idx} className="flex items-center justify-between text-sm p-2 rounded bg-muted/50">
+                    <span className="text-muted-foreground truncate flex-1">
+                      {item.item_name || item.sku_code}
+                    </span>
+                    <Badge 
+                      variant="outline"
+                      className={cn(
+                        "ml-2",
+                        item.spec_match_percent > 70 ? "bg-green-600/10 text-green-700 border-green-600/30" :
+                        item.spec_match_percent >= 50 ? "bg-yellow-600/10 text-yellow-700 border-yellow-600/30" :
+                        "bg-red-600/10 text-red-700 border-red-600/30"
+                      )}
+                    >
+                      {item.spec_match_percent?.toFixed(1)}%
+                    </Badge>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
     </MainLayout>

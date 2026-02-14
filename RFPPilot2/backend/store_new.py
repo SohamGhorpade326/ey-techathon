@@ -7,6 +7,8 @@ _lock = threading.Lock()
 # Global in-memory store
 _STORE = {
     "sales": [],
+    "pdf_paths": [],  # Preserve PDF paths for skip mode
+    "pdf_text_cache": {},  # Preserve extracted text for skip mode
     "master": {},
     "technical": {},
     "pricing": {},
@@ -14,7 +16,9 @@ _STORE = {
     "proposal": "",
     # Gmail ingestion (kept across pipeline runs)
     "gmail_emails": [],
-    "notifications": []
+    "notifications": [],
+    # Strategic Skip infrastructure
+    "skipped_rfp_ids": []
 }
 
 
@@ -136,6 +140,23 @@ def get_sales_output() -> List[Dict[str, Any]]:
     with _lock:
         return _STORE.get("sales", [])
 
+# PDF PATHS AND TEXT CACHE (for skip mode)
+def save_pdf_paths(paths: List[str]) -> None:
+    with _lock:
+        _STORE["pdf_paths"] = paths if paths else []
+
+def get_pdf_paths() -> List[str]:
+    with _lock:
+        return _STORE.get("pdf_paths", [])
+
+def save_pdf_text_cache(cache: Dict[str, str]) -> None:
+    with _lock:
+        _STORE["pdf_text_cache"] = cache if cache else {}
+
+def get_pdf_text_cache() -> Dict[str, str]:
+    with _lock:
+        return _STORE.get("pdf_text_cache", {})
+
 # MASTER
 def save_master_output(data: Dict[str, Any]) -> None:
     with _lock:
@@ -185,9 +206,30 @@ def get_proposal_output() -> str:
 def clear_all() -> None:
     with _lock:
         _STORE["sales"] = []
+        _STORE["pdf_paths"] = []
+        _STORE["pdf_text_cache"] = {}
         _STORE["master"] = {}
         _STORE["technical"] = {}
         _STORE["pricing"] = {}
         _STORE["compliance"] = []
         _STORE["proposal"] = ""
-        # Note: Gmail emails, processed IDs, and notifications persist across runs
+        # Note: Gmail emails, processed IDs, notifications, and skipped_rfp_ids persist
+        # skipped_rfp_ids is cleared separately in normal mode but persists in skip mode
+
+# SKIPPED RFP IDS MANAGEMENT
+def add_skipped_rfp_id(rfp_id: str) -> None:
+    """Add an RFP ID to the skipped list"""
+    with _lock:
+        if rfp_id and rfp_id not in _STORE["skipped_rfp_ids"]:
+            _STORE["skipped_rfp_ids"].append(rfp_id)
+            print(f"[Store] Added {rfp_id} to skipped list")
+
+def get_skipped_rfp_ids() -> List[str]:
+    """Get the list of skipped RFP IDs"""
+    with _lock:
+        return list(_STORE.get("skipped_rfp_ids", []))
+
+def clear_skipped_rfp_ids() -> None:
+    """Clear the skipped RFP IDs list"""
+    with _lock:
+        _STORE["skipped_rfp_ids"] = []

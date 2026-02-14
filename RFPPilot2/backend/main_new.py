@@ -23,6 +23,10 @@ load_dotenv()
 from store_new import (
     save_sales_output,
     get_sales_output,
+    save_pdf_paths,
+    get_pdf_paths,
+    save_pdf_text_cache,
+    get_pdf_text_cache,
     save_master_output,
     get_master_output,
     save_technical_output,
@@ -41,7 +45,9 @@ from store_new import (
     get_unprocessed_gmail_emails,
     mark_gmail_email_processed,
     clear_notifications,
-    clear_gmail_data
+    clear_gmail_data,
+    add_skipped_rfp_id,
+    clear_skipped_rfp_ids
 )
 
 # Pydantic models for request bodies
@@ -139,34 +145,74 @@ async def startup_event():
         print("[Startup] ⚠️ SKU embeddings not loaded")
     
     print("[Startup] ✅ Persistent browser page will initialize on first request (lazy-load)")
-    
-    # Fire-and-forget warmup for additional checks
-    _pipeline_executor.submit(warmup_pipeline)
     print("[Startup] 🚀 Application startup complete - embeddings pre-loaded, persistent page pattern enabled")
+    
+    # Schedule warmup after event loop is fully initialized (prevents asyncio.CancelledError)
+    import asyncio
+    async def delayed_warmup():
+        await asyncio.sleep(0.5)  # Small delay to let event loop stabilize
+        _pipeline_executor.submit(warmup_pipeline)
+    
+    asyncio.create_task(delayed_warmup())
 
 
 # Background runner
-def run_pipeline_bg(task_id: str):
+def run_pipeline_bg(task_id: str, skip_mode: bool = False):
+    """
+    Run the RFP pipeline.
+    
+    Args:
+        task_id: Unique task identifier
+        skip_mode: If True, reuse existing sales_output and skip Sales Agent re-run
+    """
     try:
         task_status[task_id] = "running"
-        clear_all()
         
         # Use pre-loaded module (already initialized)
         rfp_module = load_rfp_module()
         
         state = {}
         
-        # Sales Agent (process website PDFs first)
-        state = rfp_module.sales_agent_node(state)
-        sales_data = state.get("sales_output", [])
+        if skip_mode:
+            # Skip mode: Reuse existing sales data, don't re-download PDFs
+            print("[Pipeline Skip Mode] Reusing existing sales data, skipping Sales Agent...")
+            sales_data = get_sales_output()
+            if not sales_data:
+                print("[Pipeline Skip Mode] ⚠️ No existing sales data found")
+                task_status[task_id] = "failed"
+                return
+            state["sales_output"] = sales_data
+            
+            # Restore PDF paths and text cache
+            pdf_paths = get_pdf_paths()
+            pdf_text_cache = get_pdf_text_cache()
+            state["pdf_paths"] = pdf_paths
+            state["pdf_text_cache"] = pdf_text_cache
+            
+            print(f"[Pipeline Skip Mode] ✅ Loaded {len(sales_data)} existing RFP(s)")
+            print(f"[Pipeline Skip Mode] ✅ Restored {len(pdf_paths)} PDF path(s) and {len(pdf_text_cache)} cached text(s)")
+        else:
+            # Normal mode: Clear all and run Sales Agent
+            clear_all()
+            
+            # Clear skipped RFP IDs when starting fresh (allows re-evaluation of all RFPs)
+            clear_skipped_rfp_ids()
+            print("[Pipeline] ✅ Cleared skipped RFP IDs - starting fresh discovery")
+            
+            # Sales Agent (process website PDFs first)
+            state = rfp_module.sales_agent_node(state)
+            sales_data = state.get("sales_output", [])
 
         # ------------------------------------------------------------------
-        # Gmail Integration: Delegate to AI module for robust processing
+        # Gmail Integration: Process Gmail emails (only in normal mode, not skip mode)
         # - Removes manual regex extraction
         # - Uses LLM-based extraction with Ground Truth validation
         # - Ensures domain-intelligent matching for MEDC power cables
         # ------------------------------------------------------------------
-        gmail_emails = get_unprocessed_gmail_emails()
+        if not skip_mode:
+            gmail_emails = get_unprocessed_gmail_emails()
+        else:
+            gmail_emails = []
         gmail_sales_data = []
         gmail_extracted_items_map = {}  # Map rfp_id -> extracted_item_list
         gmail_text_cache = {}  # Map rfp_id -> full text for Technical Agent
@@ -240,10 +286,29 @@ def run_pipeline_bg(task_id: str):
             state["gmail_extracted_items_map"] = gmail_extracted_items_map
             state["gmail_text_cache"] = gmail_text_cache
 
+        # Save sales output and PDF data (for skip mode reuse)
         save_sales_output(sales_data)
+        if not skip_mode:
+            # Only save PDF paths and cache in normal mode (skip mode already restored them)
+            pdf_paths = state.get("pdf_paths", [])
+            pdf_text_cache = state.get("pdf_text_cache", {})
+            save_pdf_paths(pdf_paths)
+            save_pdf_text_cache(pdf_text_cache)
+            print(f"[Pipeline] ✅ Saved {len(pdf_paths)} PDF path(s) and {len(pdf_text_cache)} cached text(s) for skip mode reuse")
         
         # Priority Selector (internal - doesn't affect saved sales output)
         state = rfp_module.select_highest_priority_rfp(state)
+        
+        # Check if any RFPs remain after filtering skipped items
+        selected_rfps = state.get("sales_output", [])
+        if not selected_rfps or len(selected_rfps) == 0:
+            print("[Pipeline] ❌ No RFPs available after filtering skipped items")
+            task_status[task_id] = "failed"
+            # Save empty outputs to indicate no data
+            save_master_output({"error": "No RFPs available - all have been skipped"})
+            save_technical_output({"error": "No RFPs available"})
+            save_pricing_output({"error": "No RFPs available"})
+            return
         
         # Restore Gmail-specific data for the selected RFP
         # After select_highest_priority_rfp, state["sales_output"] contains only the selected RFP
@@ -329,6 +394,78 @@ def run_pipeline():
     _pipeline_executor.submit(run_pipeline_bg, task_id)
     
     return {"task_id": task_id, "status": "started"}
+
+
+@app.post("/pipeline/skip")
+def skip_current_rfp():
+    """
+    Skip the current RFP and re-run the pipeline with the next best RFP.
+    
+    Loop Infrastructure:
+    1. Get current RFP ID from master output
+    2. Add it to skipped_rfp_ids list
+    3. Clear current agent outputs (master, technical, pricing, compliance, proposal)
+    4. Re-invoke pipeline to process next best RFP
+    """
+    try:
+        # Get current RFP ID from master output
+        master_output = get_master_output()
+        current_rfp_id = None
+        
+        if master_output and "technical_summary" in master_output:
+            rfp_context = master_output.get("technical_summary", {}).get("rfp_context", {})
+            current_rfp_id = rfp_context.get("rfp_id")
+        
+        if not current_rfp_id:
+            # Fallback: try to get from sales output
+            sales_output = get_sales_output()
+            if sales_output and len(sales_output) > 0:
+                # If we have multiple RFPs, we need to find which one was selected
+                # For now, just skip the first one if master_output doesn't exist yet
+                current_rfp_id = sales_output[0].get("rfp_id")
+        
+        if not current_rfp_id:
+            return {
+                "status": "error",
+                "message": "No current RFP found to skip. Please run the pipeline first."
+            }
+        
+        print(f"[Pipeline Skip] Skipping RFP: {current_rfp_id}")
+        
+        # Add to skipped list
+        add_skipped_rfp_id(current_rfp_id)
+        
+        # Clear current agent outputs (but keep sales_output and skipped_rfp_ids)
+        save_master_output({})
+        save_technical_output({})
+        save_pricing_output({})
+        save_compliance_output([])
+        save_proposal_output("")
+        
+        print(f"[Pipeline Skip] Cleared agent outputs, re-running pipeline...")
+        
+        # Create a new task and re-run the pipeline in skip mode
+        task_id = str(uuid.uuid4())
+        task_status[task_id] = "queued"
+        
+        # Submit to pipeline executor to pick next best RFP (skip_mode=True to reuse sales data)
+        _pipeline_executor.submit(run_pipeline_bg, task_id, skip_mode=True)
+        
+        return {
+            "status": "success",
+            "message": f"RFP {current_rfp_id} skipped. Processing next best RFP...",
+            "skipped_rfp_id": current_rfp_id,
+            "task_id": task_id
+        }
+        
+    except Exception as e:
+        print(f"[Pipeline Skip Error] {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "status": "error",
+            "message": f"Failed to skip RFP: {str(e)}"
+        }
 
 
 class GmailRfpEvent(BaseModel):

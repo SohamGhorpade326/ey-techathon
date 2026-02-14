@@ -14,7 +14,8 @@ import {
   GanttChart,
   CheckCircle2,
   ListTodo,
-  Boxes
+  Boxes,
+  SkipForward
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 
@@ -33,6 +34,7 @@ export default function Masteragent() {
   const [loading, setLoading] = useState(true);
   const [aiSummary, setAiSummary] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isSkipping, setIsSkipping] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -64,6 +66,87 @@ export default function Masteragent() {
     }
   };
 
+  const handleStrategicSkip = async () => {
+    if (!data?.technical_summary?.rfp_context?.rfp_id) {
+      alert("No RFP ID found to skip");
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Are you sure you want to skip RFP ${data.technical_summary.rfp_context.rfp_id}? The system will process the next best RFP.`
+    );
+
+    if (!confirmed) return;
+
+    setIsSkipping(true);
+    try {
+      const response = await fetch("http://127.0.0.1:8000/pipeline/skip", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const result = await response.json();
+
+      if (result.status === "success") {
+        // Show success message
+        alert(`RFP skipped successfully. Processing next best RFP...`);
+        
+        // Poll for the new task to complete
+        const taskId = result.task_id;
+        const pollInterval = setInterval(async () => {
+          const statusRes = await fetch(`http://127.0.0.1:8000/run/status/${taskId}`);
+          const statusData = await statusRes.json();
+          
+          if (statusData.status === "completed") {
+            clearInterval(pollInterval);
+            // Check if there are any RFPs left
+            const masterRes = await fetch("http://127.0.0.1:8000/master/output");
+            const masterData = await masterRes.json();
+            
+            if (masterData.error && masterData.error.includes("No RFPs available")) {
+              setIsSkipping(false);
+              alert("All available RFPs have been skipped. Please run the Sales Agent again to discover new opportunities.");
+              window.location.href = "/dashboard";
+            } else {
+              // Reload the page to show the new RFP
+              window.location.reload();
+            }
+          } else if (statusData.status === "failed") {
+            clearInterval(pollInterval);
+            // Check if it failed due to no RFPs
+            const masterRes = await fetch("http://127.0.0.1:8000/master/output");
+            const masterData = await masterRes.json();
+            
+            if (masterData.error && masterData.error.includes("No RFPs available")) {
+              setIsSkipping(false);
+              alert("All available RFPs have been skipped. Please run the Sales Agent again to discover new opportunities.");
+              window.location.href = "/dashboard";
+            } else {
+              setIsSkipping(false);
+              alert("Failed to process next RFP. Please check the pipeline status.");
+            }
+          }
+        }, 2000);
+        
+        // Timeout after 2 minutes
+        setTimeout(() => {
+          clearInterval(pollInterval);
+          if (isSkipping) {
+            setIsSkipping(false);
+            alert("Pipeline is taking longer than expected. Please check the dashboard.");
+          }
+        }, 120000);
+      } else {
+        setIsSkipping(false);
+        alert(`Failed to skip RFP: ${result.message}`);
+      }
+    } catch (error) {
+      setIsSkipping(false);
+      console.error("Error skipping RFP:", error);
+      alert("Failed to skip RFP. Please try again.");
+    }
+  };
+
   if (loading) return <div className="flex h-screen items-center justify-center"><Loader2 className="animate-spin text-primary" /></div>;
   if (!data) return <div className="p-20 text-center">Master Agent data not found. Please execute Sales Agent first.</div>;
 
@@ -91,6 +174,17 @@ export default function Masteragent() {
               <Download className="mr-2 h-4 w-4" /> Export Report
             </Button>
           )}
+          {/* STRATEGIC SKIP BUTTON */}
+          <Button 
+            variant="destructive" 
+            size="sm" 
+            onClick={handleStrategicSkip}
+            disabled={isSkipping}
+            className="bg-gradient-to-r from-orange-600 to-red-600 hover:from-orange-700 hover:to-red-700 text-white border-none shadow-lg shadow-orange-500/20"
+          >
+            {isSkipping ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <SkipForward className="mr-2 h-4 w-4" />}
+            Strategic Skip & Cycle
+          </Button>
         </div>
       </div>
 

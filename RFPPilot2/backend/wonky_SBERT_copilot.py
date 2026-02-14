@@ -27,6 +27,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.neighbors import NearestNeighbors
 import numpy as np
 from store import save_rfp
+from store_new import get_skipped_rfp_ids
 from tech_formatters import (
     format_technical_for_frontend,
     build_comparison_matrix
@@ -862,9 +863,19 @@ def sales_agent_node(state: RFPState) -> RFPState:
     page.on("download", handle_download)
     
     try:
-        page.goto(SITE_URL, timeout=60000, wait_until="domcontentloaded")
-        time.sleep(5)  # Wait for page to fully load
-
+        # Navigate to RFP discovery page and wait for network to be idle
+        print(f"[Sales Agent] Navigating to {SITE_URL}...")
+        page.goto(SITE_URL, timeout=60000, wait_until="networkidle")
+        
+        # Wait specifically for download buttons to appear (with retry)
+        try:
+            page.wait_for_selector("a:has-text('Download')", timeout=15000)
+            print("[Sales Agent] ✅ Download buttons loaded")
+        except Exception as e:
+            print(f"[Sales Agent] ⚠️ No download buttons found initially, trying reload...")
+            page.reload(wait_until="networkidle")
+            page.wait_for_selector("a:has-text('Download')", timeout=10000)
+        
         buttons = page.locator("a:has-text('Download')")
         count = buttons.count()
         print(f"[Sales Agent] Found {count} RFP PDFs")
@@ -948,6 +959,37 @@ def select_highest_priority_rfp(state: RFPState) -> RFPState:
     if not rfps:
         print("[Flow] No RFPs found")
         return state
+
+    # Filter out skipped RFPs (and corresponding PDFs)
+    skipped_ids = get_skipped_rfp_ids()
+    if skipped_ids:
+        print(f"[Flow] Filtering out {len(skipped_ids)} skipped RFP(s): {skipped_ids}")
+        original_count = len(rfps)
+        
+        # Filter both rfps and pdfs together to maintain index alignment
+        filtered_rfps = []
+        filtered_pdfs = []
+        for idx, rfp in enumerate(rfps):
+            if rfp.get("rfp_id") not in skipped_ids:
+                filtered_rfps.append(rfp)
+                # Add corresponding PDF if it exists
+                if idx < len(pdfs):
+                    filtered_pdfs.append(pdfs[idx])
+                else:
+                    filtered_pdfs.append(None)
+        
+        rfps = filtered_rfps
+        pdfs = filtered_pdfs
+        
+        print(f"[Flow] {original_count} RFPs -> {len(rfps)} RFPs after filtering")
+        
+        # Update state with filtered RFPs and PDFs
+        state["sales_output"] = rfps
+        state["pdf_paths"] = pdfs
+        
+        if not rfps:
+            print("[Flow] No RFPs remaining after filtering skipped items")
+            return state
 
     # Priority order: Critical > High > Medium
     priority_rank = {"Critical": 0, "High": 1, "Medium": 2}
@@ -2614,6 +2656,7 @@ def pricing_agent_node(state: RFPState) -> RFPState:
             "material_total": material_cost,
             "testing_cost": testing_cost,
             "line_total": material_cost + testing_cost,
+            "spec_match_percent": spec_match,  # Include for Technical Viability Assessment
             "risk": risk,
             "pricing_rationale": pricing_rationale
         })
